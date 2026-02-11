@@ -106,6 +106,8 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
             var data = messageEvent.GetData<VfsOpenMessage>();
             if (data == null || data.Type != "vfs-open") return;
 
+            Console.WriteLine($"[VfsBridge] Received vfs-open for: {data.Path} range={data.RangeStart}-{data.RangeEnd}");
+
             // Get the MessagePort transferred by the service worker
             var ports = messageEvent.Ports;
             if (ports == null || ports.Length == 0)
@@ -129,10 +131,13 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
     {
         try
         {
+            Console.WriteLine($"[VfsBridge] HandleVfsOpen: resolving '{path}'");
             var node = await _vfs.GetNodeAsync(path);
+            Console.WriteLine($"[VfsBridge] GetNodeAsync returned: {(node == null ? "null" : node.GetType().Name + " " + node.Name)}");
 
             if (node is not IVfsFile file)
             {
+                Console.WriteLine($"[VfsBridge] Not a file — sending 404 for '{path}'");
                 port.PostMessage(new
                 {
                     type = "vfs-meta",
@@ -142,6 +147,8 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
                 port.Dispose();
                 return;
             }
+
+            Console.WriteLine($"[VfsBridge] File resolved: {file.Name}, size={file.Size}, mime={file.MimeType}");
 
             var totalSize = file.Size;
             var contentType = file.MimeType ?? "application/octet-stream";

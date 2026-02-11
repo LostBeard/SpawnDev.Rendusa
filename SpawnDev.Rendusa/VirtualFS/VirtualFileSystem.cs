@@ -201,7 +201,8 @@ public class VirtualFileSystem
                 var childMount = _mounts.FirstOrDefault(mm => mm.MountPath == childPath);
                 if (childMount != null)
                 {
-                    result.Add(new VirtualDirectory(nextSegment, childPath, childMount.Handler));
+                    var node = await ResolveOverlayRootAsync(childMount.Handler, nextSegment, childPath);
+                    result.Add(node);
                 }
                 else
                 {
@@ -219,7 +220,8 @@ public class VirtualFileSystem
                     var index = result.FindIndex(n => string.Equals(n.Name, nextSegment, StringComparison.OrdinalIgnoreCase));
                     if (index >= 0)
                     {
-                        result[index] = new VirtualDirectory(nextSegment, childPath, childMount.Handler);
+                        var node = await ResolveOverlayRootAsync(childMount.Handler, nextSegment, childPath);
+                        result[index] = node;
                     }
                 }
             }
@@ -237,9 +239,15 @@ public class VirtualFileSystem
                 {
                     var childPath = path == "/" ? $"/{nextSegment}" : $"{path}/{nextSegment}";
                     var childMount = _mounts.FirstOrDefault(mm => mm.MountPath == childPath);
-                    result.Add(childMount != null
-                        ? new VirtualDirectory(nextSegment, childPath, childMount.Handler)
-                        : new VirtualDirectory(nextSegment, childPath, new SyntheticHandler(nextSegment)));
+                    if (childMount != null)
+                    {
+                        var node = await ResolveOverlayRootAsync(childMount.Handler, nextSegment, childPath);
+                        result.Add(node);
+                    }
+                    else
+                    {
+                        result.Add(new VirtualDirectory(nextSegment, childPath, new SyntheticHandler(nextSegment)));
+                    }
                 }
             }
         }
@@ -301,6 +309,26 @@ public class VirtualFileSystem
         if (node is IVfsFile file)
             return await file.ReadRangeAsync(offset, length);
         throw new FileNotFoundException($"VFS file not found: {path}");
+    }
+
+    // --- Overlay helpers ---
+
+    /// <summary>
+    /// Resolve an overlay mount handler's root node so we can extract its metadata
+    /// (e.g. torrent progress, source badge). Falls back to a plain VirtualDirectory.
+    /// </summary>
+    private async Task<IVfsNode> ResolveOverlayRootAsync(IFsHandler handler, string name, string vfsPath)
+    {
+        try
+        {
+            var resolved = await handler.ResolveAsync("");
+            if (resolved != null) return resolved;
+        }
+        catch
+        {
+            // Handler may not support resolve; fall through
+        }
+        return new VirtualDirectory(name, vfsPath, handler);
     }
 
     // --- Path helpers ---

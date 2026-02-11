@@ -498,12 +498,6 @@ input[type="range"]::-moz-range-thumb {
     gap: 1rem;
 }
 
-/* Blazor Virtualize spacer divs — span full width so they don't displace grid items */
-.media-grid>div[style*="overflow"] {
-    grid-column: 1 / -1;
-    height: 0 !important;
-}
-
 .media-card {
     background: var(--bg-surface);
     border: 1px solid var(--border-color);

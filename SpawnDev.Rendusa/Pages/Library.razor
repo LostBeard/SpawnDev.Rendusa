@@ -94,7 +94,8 @@
     else
     {
         <div class="media-grid">
-            <Virtualize Items="CurrentNodes" Context="node" OverscanCount="4">
+            @foreach (var node in CurrentNodes)
+            {
                 @if (node.NodeType == VfsNodeType.Directory)
                 {
                     <div class="media-card folder-card"
@@ -161,7 +162,7 @@
                         </div>
                     </div>
                 }
-            </Virtualize>
+            }
         </div>
     }
 
