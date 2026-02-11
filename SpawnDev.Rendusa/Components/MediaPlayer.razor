@@ -1,0 +1,609 @@
+@inject SettingsService SettingsService
+@implements IDisposable
+
+<div class="player-container @(IsFullscreen ? "fullscreen" : "")"
+     id="rendusa-player"
+     @ref="PlayerContainer"
+     @onmousemove="OnMouseMove"
+     @onclick="OnPlayerClick"
+     @onmouseleave="OnMouseLeave"
+     tabindex="0"
+     @onkeydown="OnKeyDown"
+     @onkeydown:preventDefault="true">
+
+    @* === Media Viewport === *@
+    <div class="player-viewport">
+        @if (CurrentItem == null)
+        {
+            <div class="no-media">
+                <div class="no-media-icon">🎬</div>
+                <div>No media loaded</div>
+                <div class="text-muted" style="font-size: 0.8rem; margin-top: 0.3rem;">
+                    Add files to your library or drag and drop here
+                </div>
+            </div>
+        }
+        else if (CurrentItem.Type == MediaType.Video)
+        {
+            <video @ref="VideoElement"
+                   src="@CurrentItem.SourceUri">
+            </video>
+        }
+        else if (CurrentItem.Type == MediaType.Audio)
+        {
+            <div class="audio-visualization">
+                <div class="audio-icon">🎵</div>
+                <div class="audio-title">@CurrentItem.Title</div>
+                @if (!string.IsNullOrEmpty(CurrentItem.Artist))
+                {
+                    <div class="audio-artist text-secondary">@CurrentItem.Artist</div>
+                }
+            </div>
+            <audio @ref="AudioElement"
+                   src="@CurrentItem.SourceUri"
+                   style="display:none;">
+            </audio>
+        }
+        else if (CurrentItem.Type == MediaType.Image)
+        {
+            <img src="@CurrentItem.SourceUri" alt="@CurrentItem.Title" />
+        }
+    </div>
+
+    @* === Controls Overlay — rendered INSIDE the player container so they
+         appear on top of content in all modes including fullscreen 3D === *@
+    <div class="player-controls-overlay @(ControlsVisible ? "visible" : "hidden")">
+        @if (CurrentItem != null)
+        {
+            <div class="controls-gradient">
+                @* Seek bar — always show for video/audio; for images show nothing *@
+                @if (CurrentItem.Type != MediaType.Image)
+                {
+                    <input type="range" class="seek-bar w-full"
+                           min="0" max="@Duration" step="0.1" value="@CurrentTime"
+                           @onchange="OnSeek"
+                           @onclick:stopPropagation="true" />
+                }
+
+                <div class="player-controls-row">
+                    @* Left: transport + time *@
+                    <div class="controls-left">
+                        <button class="btn-icon" @onclick="PreviousTrack" @onclick:stopPropagation="true" title="Previous">⏮</button>
+                        <button class="btn-icon btn-play" @onclick="TogglePlay" @onclick:stopPropagation="true"
+                                title="@(IsPlaying ? "Pause" : "Play")">
+                            @(IsPlaying ? "⏸" : "▶")
+                        </button>
+                        <button class="btn-icon" @onclick="NextTrack" @onclick:stopPropagation="true" title="Next">⏭</button>
+                        @if (CurrentItem.Type != MediaType.Image)
+                        {
+                            <span class="time-display">@FormatTime(CurrentTime) / @FormatTime(Duration)</span>
+                        }
+                        else
+                        {
+                            <span class="time-display">Image @(CurrentIndex + 1) / @Items.Count</span>
+                        }
+                    </div>
+
+                    @* Center: now playing *@
+                    <div class="controls-center">
+                        <span class="now-playing-info truncate">@CurrentItem.Title</span>
+                    </div>
+
+                    @* Right: shuffle, repeat, volume, fullscreen *@
+                    <div class="controls-right">
+                        <button class="btn-icon @(Shuffle ? "active" : "")" @onclick="ToggleShuffle"
+                                @onclick:stopPropagation="true" title="Shuffle">🔀</button>
+                        <button class="btn-icon @(Repeat != RepeatMode.None ? "active" : "")" @onclick="CycleRepeat"
+                                @onclick:stopPropagation="true" title="@GetRepeatTitle()">
+                            @GetRepeatIcon()
+                        </button>
+                        <span class="volume-group" @onclick:stopPropagation="true">
+                            <button class="btn-icon" @onclick="ToggleMute" title="@(IsMuted ? "Unmute" : "Mute")">
+                                @(IsMuted ? "🔇" : Volume > 0.5 ? "🔊" : "🔉")
+                            </button>
+                            <input type="range" class="volume-slider" min="0" max="1" step="0.05"
+                                   value="@(IsMuted ? 0 : Volume)" @onchange="OnVolumeChange" />
+                        </span>
+                        <button class="btn-icon" @onclick="ToggleFullscreen" @onclick:stopPropagation="true"
+                                title="@(IsFullscreen ? "Exit Fullscreen" : "Fullscreen")">
+                            @(IsFullscreen ? "⛶" : "⛶")
+                        </button>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            @* Even with no media, show a minimal bar so fullscreen is always accessible *@
+            <div class="controls-gradient controls-minimal">
+                <div class="player-controls-row">
+                    <div class="controls-left">
+                        <span class="text-muted" style="font-size: 0.8rem;">No media loaded</span>
+                    </div>
+                    <div class="controls-right">
+                        <button class="btn-icon" @onclick="ToggleFullscreen" @onclick:stopPropagation="true" title="Fullscreen">⛶</button>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public List<MediaItem> Items { get; set; } = new();
+    [Parameter] public string? StartItemId { get; set; }
+
+    private ElementReference PlayerContainer;
+    private ElementReference VideoElement;
+    private ElementReference AudioElement;
+
+    private MediaItem? CurrentItem;
+    private int CurrentIndex = 0;
+    private bool IsPlaying = false;
+    private double CurrentTime = 0;
+    private double Duration = 0;
+    private double Volume = 0.8;
+    private bool IsMuted = false;
+    private bool Shuffle = false;
+    private RepeatMode Repeat = RepeatMode.None;
+    private bool IsFullscreen = false;
+    private bool ControlsVisible = true;
+    private DateTime _lastMouseMove = DateTime.UtcNow;
+    private System.Threading.Timer? _hideTimer;
+    private System.Threading.Timer? _slideshowTimer;
+    private System.Threading.Timer? _timeUpdateTimer;
+    private bool _mediaReady = false;
+    private string? _startItemHandled;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Volume = SettingsService.Settings.DefaultVolume;
+
+        // Auto-hide timer: check every 500ms if controls should hide
+        _hideTimer = new System.Threading.Timer(CheckHideControls, null, 500, 500);
+    }
+
+    protected override void OnParametersSet()
+    {
+        // If a specific item was requested (e.g. from Library click), play it
+        if (!string.IsNullOrEmpty(StartItemId) && _startItemHandled != StartItemId)
+        {
+            _startItemHandled = StartItemId;
+            var item = Items.FirstOrDefault(i => i.Id == StartItemId);
+            if (item != null)
+            {
+                PlayItem(item);
+                return;
+            }
+        }
+
+        if (CurrentItem == null && Items.Count > 0)
+        {
+            CurrentIndex = 0;
+            CurrentItem = Items[CurrentIndex];
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Set up the JS media element whenever we have a current item but haven't set it up yet
+        if (CurrentItem != null && !_mediaReady)
+        {
+            await SetupMediaElementAsync();
+        }
+    }
+
+    /// <summary>
+    /// Obtain the active HTMLMediaElement (video or audio) from its @ref.
+    /// Uses the explicit cast from ElementReference to HTMLMediaElement via BlazorJS.
+    /// </summary>
+    private SpawnDev.BlazorJS.JSObjects.HTMLMediaElement? GetMediaElement()
+    {
+        if (CurrentItem == null) return null;
+        if (CurrentItem.Type == MediaType.Video)
+        {
+            return (SpawnDev.BlazorJS.JSObjects.HTMLMediaElement?)VideoElement;
+        }
+        else if (CurrentItem.Type == MediaType.Audio)
+        {
+            return (SpawnDev.BlazorJS.JSObjects.HTMLMediaElement?)AudioElement;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Wire up the JS media element after render: set volume, muted, and start polling time.
+    /// </summary>
+    private async Task SetupMediaElementAsync()
+    {
+        using var media = GetMediaElement();
+        if (media == null)
+        {
+            // Image mode — start slideshow timer if configured
+            if (CurrentItem?.Type == MediaType.Image)
+            {
+                StartSlideshowTimer();
+            }
+            _mediaReady = true;
+            return;
+        }
+
+        try
+        {
+            media.Volume = Volume;
+            media.Muted = IsMuted;
+
+            // Auto-play if IsPlaying was set (e.g. from PlayItem)
+            if (IsPlaying)
+            {
+                try { await media.Play(); }
+                catch { IsPlaying = false; } // Autoplay may be blocked
+            }
+
+            // Poll time updates from JS every 250ms
+            _timeUpdateTimer?.Dispose();
+            _timeUpdateTimer = new System.Threading.Timer(async _ =>
+            {
+                await InvokeAsync(() =>
+                {
+                    try
+                    {
+                        using var m = GetMediaElement();
+                        if (m == null) return;
+                        var dur = m.Duration;
+                        CurrentTime = m.CurrentTime;
+                        Duration = dur.HasValue && !double.IsNaN(dur.Value) && !double.IsInfinity(dur.Value) ? dur.Value : 0;
+                        if (m.Ended)
+                        {
+                            OnMediaEnded();
+                        }
+                        StateHasChanged();
+                    }
+                    catch { }
+                });
+            }, null, 250, 250);
+
+            _mediaReady = true;
+        }
+        catch { }
+    }
+
+    private void OnMouseMove()
+    {
+        _lastMouseMove = DateTime.UtcNow;
+        if (!ControlsVisible)
+        {
+            ControlsVisible = true;
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void OnMouseLeave()
+    {
+        // Keep controls visible when not fullscreen
+        if (!IsFullscreen) return;
+        ControlsVisible = false;
+    }
+
+    private async Task OnPlayerClick()
+    {
+        // Click on viewport toggles play/pause (like VLC)
+        if (CurrentItem != null)
+        {
+            await TogglePlay();
+        }
+    }
+
+    private void CheckHideControls(object? state)
+    {
+        // Auto-hide controls after 3 seconds of inactivity in fullscreen
+        if (!IsFullscreen) return;
+        if ((DateTime.UtcNow - _lastMouseMove).TotalSeconds > 3 && ControlsVisible)
+        {
+            ControlsVisible = false;
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ToggleFullscreen()
+    {
+        try
+        {
+            if (!IsFullscreen)
+            {
+                using var el = (SpawnDev.BlazorJS.JSObjects.HTMLElement?)PlayerContainer;
+                if (el != null)
+                {
+                    await el.RequestFullscreen();
+                    IsFullscreen = true;
+                }
+            }
+            else
+            {
+                using var window = new SpawnDev.BlazorJS.JSObjects.Window();
+                using var doc = window.Document;
+                await doc.ExitFullscreen();
+                IsFullscreen = false;
+            }
+        }
+        catch
+        {
+            // Fullscreen may not be available in all contexts
+        }
+        ControlsVisible = true;
+    }
+
+    private async Task TogglePlay()
+    {
+        if (CurrentItem?.Type == MediaType.Image)
+        {
+            // For images, toggle slideshow
+            IsPlaying = !IsPlaying;
+            if (IsPlaying)
+                StartSlideshowTimer();
+            else
+                StopSlideshowTimer();
+            return;
+        }
+
+        using var media = GetMediaElement();
+        if (media == null) return;
+
+        if (IsPlaying)
+        {
+            media.Pause();
+            IsPlaying = false;
+        }
+        else
+        {
+            try
+            {
+                await media.Play();
+                IsPlaying = true;
+            }
+            catch
+            {
+                // Autoplay may be blocked
+            }
+        }
+    }
+
+    private void ToggleMute()
+    {
+        IsMuted = !IsMuted;
+        try
+        {
+            using var media = GetMediaElement();
+            if (media != null)
+            {
+                media.Muted = IsMuted;
+            }
+        }
+        catch { }
+    }
+
+    private void OnMediaEnded()
+    {
+        IsPlaying = false;
+        if (Repeat == RepeatMode.RepeatOne)
+        {
+            // Replay current
+            try
+            {
+                using var media = GetMediaElement();
+                if (media != null)
+                {
+                    media.CurrentTime = 0;
+                    _ = media.Play();
+                    IsPlaying = true;
+                }
+            }
+            catch { }
+        }
+        else if (SettingsService.Settings.AutoPlayNext || Repeat == RepeatMode.RepeatAll)
+        {
+            NextTrack();
+        }
+    }
+
+    private void NextTrack()
+    {
+        if (Items.Count == 0) return;
+        StopSlideshowTimer();
+        _timeUpdateTimer?.Dispose();
+        _mediaReady = false;
+
+        if (Shuffle)
+        {
+            CurrentIndex = Random.Shared.Next(Items.Count);
+        }
+        else
+        {
+            CurrentIndex = (CurrentIndex + 1) % Items.Count;
+        }
+        if (CurrentIndex == 0 && Repeat == RepeatMode.None && !Shuffle)
+        {
+            IsPlaying = false;
+            return;
+        }
+        CurrentItem = Items[CurrentIndex];
+        CurrentTime = 0;
+        Duration = 0;
+    }
+
+    private void PreviousTrack()
+    {
+        if (Items.Count == 0) return;
+        StopSlideshowTimer();
+        _timeUpdateTimer?.Dispose();
+        _mediaReady = false;
+
+        CurrentIndex = CurrentIndex > 0 ? CurrentIndex - 1 : Items.Count - 1;
+        CurrentItem = Items[CurrentIndex];
+        CurrentTime = 0;
+        Duration = 0;
+    }
+
+    /// <summary>
+    /// Play a specific media item from the list.
+    /// </summary>
+    public void PlayItem(MediaItem item)
+    {
+        var idx = Items.IndexOf(item);
+        if (idx < 0)
+        {
+            Items.Add(item);
+            idx = Items.Count - 1;
+        }
+        StopSlideshowTimer();
+        _timeUpdateTimer?.Dispose();
+        _mediaReady = false;
+
+        CurrentIndex = idx;
+        CurrentItem = item;
+        CurrentTime = 0;
+        Duration = 0;
+        IsPlaying = true;
+        StateHasChanged();
+    }
+
+    private void OnSeek(ChangeEventArgs e)
+    {
+        if (double.TryParse(e.Value?.ToString(), out var val))
+        {
+            CurrentTime = val;
+            try
+            {
+                using var media = GetMediaElement();
+                if (media != null)
+                {
+                    media.CurrentTime = val;
+                }
+            }
+            catch { }
+        }
+    }
+
+    private void OnVolumeChange(ChangeEventArgs e)
+    {
+        if (double.TryParse(e.Value?.ToString(), out var val))
+        {
+            Volume = val;
+            IsMuted = val <= 0;
+            try
+            {
+                using var media = GetMediaElement();
+                if (media != null)
+                {
+                    media.Volume = val;
+                    media.Muted = IsMuted;
+                }
+            }
+            catch { }
+        }
+    }
+
+    private void ToggleShuffle() => Shuffle = !Shuffle;
+
+    private void CycleRepeat()
+    {
+        Repeat = Repeat switch
+        {
+            RepeatMode.None => RepeatMode.RepeatAll,
+            RepeatMode.RepeatAll => RepeatMode.RepeatOne,
+            _ => RepeatMode.None
+        };
+    }
+
+    // --- Image slideshow ---
+
+    private void StartSlideshowTimer()
+    {
+        StopSlideshowTimer();
+        var durationMs = (int)(SettingsService.Settings.ImagePlayDuration * 1000);
+        _slideshowTimer = new System.Threading.Timer(_ =>
+        {
+            InvokeAsync(() =>
+            {
+                NextTrack();
+                if (CurrentItem?.Type == MediaType.Image && IsPlaying)
+                {
+                    // Restart timer for next image
+                    StartSlideshowTimer();
+                }
+                else
+                {
+                    IsPlaying = false;
+                }
+                StateHasChanged();
+            });
+        }, null, durationMs, Timeout.Infinite);
+    }
+
+    private void StopSlideshowTimer()
+    {
+        _slideshowTimer?.Dispose();
+        _slideshowTimer = null;
+    }
+
+    // --- Keyboard ---
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case " ":
+            case "k":
+                await TogglePlay();
+                break;
+            case "f":
+            case "F11":
+                await ToggleFullscreen();
+                break;
+            case "m":
+                ToggleMute();
+                break;
+            case "ArrowRight":
+                var newTimeR = Math.Min(Duration, CurrentTime + 5);
+                CurrentTime = newTimeR;
+                try { using var m = GetMediaElement(); if (m != null) m.CurrentTime = newTimeR; } catch { }
+                break;
+            case "ArrowLeft":
+                var newTimeL = Math.Max(0, CurrentTime - 5);
+                CurrentTime = newTimeL;
+                try { using var m = GetMediaElement(); if (m != null) m.CurrentTime = newTimeL; } catch { }
+                break;
+            case "Escape":
+                if (IsFullscreen) await ToggleFullscreen();
+                break;
+        }
+    }
+
+    private string GetRepeatTitle() => Repeat switch
+    {
+        RepeatMode.RepeatOne => "Repeat One",
+        RepeatMode.RepeatAll => "Repeat All",
+        _ => "Repeat Off"
+    };
+
+    private string GetRepeatIcon() => Repeat switch
+    {
+        RepeatMode.RepeatOne => "🔂",
+        _ => "🔁"
+    };
+
+    private static string FormatTime(double seconds)
+    {
+        var ts = TimeSpan.FromSeconds(seconds);
+        return ts.Hours > 0
+            ? ts.ToString(@"h\:mm\:ss")
+            : ts.ToString(@"m\:ss");
+    }
+
+    public void Dispose()
+    {
+        _hideTimer?.Dispose();
+        _slideshowTimer?.Dispose();
+        _timeUpdateTimer?.Dispose();
+    }
+}

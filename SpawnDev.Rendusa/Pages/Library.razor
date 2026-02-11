@@ -1,0 +1,1260 @@
+@page "/library"
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@inject MediaLibraryService MediaLibrary
+@inject FileImportService FileImport
+@inject NavigationManager Navigation
+@inject NowPlayingService NowPlaying
+@inject VfsServiceWorkerBridge VfsBridge
+@inject WebTorrentManagerService WtManager
+@inject SettingsService Settings
+@inject IJSRuntime JS
+@implements IDisposable
+@using SpawnDev.Rendusa.VirtualFS
+@using SpawnDev.Rendusa.VirtualFS.Handlers
+
+<PageTitle>Rendusa — Library</PageTitle>
+
+<div class="library-page p-2 animate-fade"
+     @oncontextmenu="OnBackgroundContext" @oncontextmenu:preventDefault="true">
+    <div class="page-header">
+        <h2>Media Library</h2>
+        <div class="actions" style="display:flex; gap:0.5rem;">
+            @if (MediaLibrary.VFS.IsWritable(CurrentPath))
+            {
+                <button class="btn" @onclick="ShowNewFolderPrompt">
+                    📁 New Folder
+                </button>
+                <button class="btn" @onclick="ShowNewPlaylistPrompt">
+                    🎵 New Playlist
+                </button>
+            }
+            <button class="btn btn-primary" @onclick="AddFiles">
+                ➕ Import
+            </button>
+            @if (IsLocalHandler())
+            {
+                <button class="btn" @onclick="AddFolder">
+                    📂 Link Folder
+                </button>
+            }
+            @if (Settings.Settings.WebTorrentEnabled && MediaLibrary.VFS.IsWritable(CurrentPath))
+            {
+                <button class="btn" @onclick="ShowAddTorrentModal">
+                    🧲 Add Torrent
+                </button>
+            }
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(StatusMessage))
+    {
+        <div class="status-bar" style="padding:0.4rem 0.8rem; background:var(--accent-glow); color:var(--accent); border-radius:var(--radius-sm); margin:0.5rem 0; font-size:0.85rem;">
+            @StatusMessage
+        </div>
+    }
+
+    @* === Breadcrumb navigation === *@
+    <nav class="breadcrumb" style="margin:0.75rem 0; display:flex; align-items:center; gap:0.3rem; font-size:0.85rem;">
+        @foreach (var (label, path) in GetBreadcrumbs())
+        {
+            if (path == CurrentPath)
+            {
+                <span style="color:var(--text-primary); font-weight:600;">@label</span>
+            }
+            else
+            {
+                <button class="btn-link" @onclick="@(() => NavigateTo(path))" style="background:none; border:none; color:var(--accent); cursor:pointer; padding:0; font-size:0.85rem;">@label</button>
+                <span style="color:var(--text-muted); margin:0 0.1rem;">›</span>
+            }
+        }
+    </nav>
+
+
+
+    @* === VFS content === *@
+    @if (IsLoading)
+    {
+        <div class="empty-state">
+            <div class="empty-icon">⏳</div>
+            <p>Loading...</p>
+        </div>
+    }
+    else if (CurrentNodes.Count == 0)
+    {
+        <div class="empty-state"
+             @ondragenter="@(() => IsDragOver = true)" @ondragleave="@(() => IsDragOver = false)"
+             @ondragover:preventDefault="true" @ondrop="HandleDrop" @ondrop:preventDefault="true"
+             style="@(IsDragOver ? "border-color:var(--accent);background:var(--accent-glow);" : "")">
+            <div class="empty-icon">📂</div>
+            <p>Nothing here yet.</p>
+            <p class="text-muted" style="font-size:0.8rem;">Drag & drop files, or use the toolbar to get started.</p>
+        </div>
+    }
+    else
+    {
+        <div class="media-grid">
+            <Virtualize Items="CurrentNodes" Context="node" OverscanCount="4">
+                @if (node.NodeType == VfsNodeType.Directory)
+                {
+                    <div class="media-card folder-card"
+                         @onclick="@(() => NavigateTo(node.Path))"
+                         @oncontextmenu="@(e => OpenContextMenu(e, node))" @oncontextmenu:preventDefault="true"
+                         @ontouchstart="@(e => OnTouchStart(e, node))" @ontouchend="OnTouchEnd" @ontouchmove="OnTouchEnd">
+                        <div class="thumbnail">
+                            <span>📂</span>
+                        </div>
+                        <div class="card-info">
+                            <div class="card-title">@node.Name</div>
+                            <div class="card-meta">
+                                <span class="badge badge-folder">@GetHandlerLabel(node)</span>
+                                @if (node.Metadata?.Source == VfsSource.Remote)
+                                {
+                                    <span class="badge badge-remote">Remote</span>
+                                }
+                                @if (node.Handler is FileSystemAccessFsHandler fsa && fsa.ReadOnly)
+                                {
+                                    <span class="badge badge-readonly">Read-Only</span>
+                                }
+                            </div>
+                            @if (node.Metadata?.Progress is double fp && fp < 1.0)
+                            {
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" style="width:@($"{fp * 100:F1}%")"></div>
+                                </div>
+                                <div class="progress-label">@($"{fp * 100:F0}%")</div>
+                            }
+                        </div>
+                    </div>
+                }
+                else if (node is IVfsFile file)
+                {
+                    <div class="media-card"
+                         @onclick="@(() => OnFileClick(file))"
+                         @oncontextmenu="@(e => OpenContextMenu(e, file))" @oncontextmenu:preventDefault="true"
+                         @ontouchstart="@(e => OnTouchStart(e, file))" @ontouchend="OnTouchEnd" @ontouchmove="OnTouchEnd">
+                        <div class="thumbnail">
+                            @if (file.MimeType?.StartsWith("image/") == true)
+                            {
+                                <img src="/vfs@(file.Path)" alt="@file.Name" loading="lazy"
+                                     onerror="this.dataset.retry=(this.dataset.retry|0)*1+1;if(this.dataset.retry<=3){var img=this;setTimeout(function(){img.src='/vfs@(file.Path)?t='+Date.now()},this.dataset.retry*2000)}else{this.style.display='none';this.nextElementSibling&&(this.nextElementSibling.style.display='')}" />
+                                <span style="display:none;">@GetFileEmoji(file)</span>
+                            }
+                            else
+                            {
+                                <span>@GetFileEmoji(file)</span>
+                            }
+                        </div>
+                        <div class="card-info">
+                            <div class="card-title">@file.Name</div>
+                            <div class="card-meta">
+                                <span class="badge @GetBadgeClass(file)">@GetMediaTypeLabel(file)</span>
+                                <span>@FormatSize(file.Size)</span>
+                            </div>
+                            @if (file.Metadata?.Progress is double prg && prg < 1.0)
+                            {
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" style="width:@($"{prg * 100:F1}%")"></div>
+                                </div>
+                                <div class="progress-label">@($"{prg * 100:F0}%")</div>
+                            }
+                        </div>
+                    </div>
+                }
+            </Virtualize>
+        </div>
+    }
+
+    @* === Right-click context menu === *@
+    @if (_contextMenuVisible)
+    {
+        <div class="context-menu-backdrop" @onclick="CloseContextMenu"></div>
+        <div class="context-menu" style="top:@(_contextMenuY)px; left:@(_contextMenuX)px;">
+            @if (_contextMenuNode == null)
+            {
+                @* Background context menu *@
+                @if (MediaLibrary.VFS.IsWritable(CurrentPath))
+                {
+                    <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); ShowNewFolderPrompt(); })">📁 New Folder</button>
+                    <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); ShowNewPlaylistPrompt(); })">🎵 New Playlist</button>
+                    <div class="ctx-divider"></div>
+                }
+                <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); AddFiles(); })">➕ Import Files</button>
+                @if (IsLocalHandler())
+                {
+                    <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); AddFolder(); })">📂 Link Folder</button>
+                }
+                @if (Settings.Settings.WebTorrentEnabled && MediaLibrary.VFS.IsWritable(CurrentPath))
+                {
+                    <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); ShowAddTorrentModal(); })">🧲 Add Torrent</button>
+                }
+            }
+            else if (_contextMenuNode.NodeType == VfsNodeType.Directory)
+            {
+                @* Folder context menu *@
+                <button class="ctx-item" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); NavigateTo(n.Path); })">📂 Open</button>
+                @if (IsRenamable(_contextMenuNode))
+                {
+                    <button class="ctx-item" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); ShowRenamePrompt(n); })">✏ Rename</button>
+                }
+                @if (IsUnlinkable(_contextMenuNode))
+                {
+                    <button class="ctx-item" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); _ = UnlinkFolder(n); })">🔗 Unlink</button>
+                }
+                @if (IsDeletable(_contextMenuNode))
+                {
+                    <div class="ctx-divider"></div>
+                    <button class="ctx-item ctx-danger" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); _ = DeleteNode(n); })">🗑 Delete</button>
+                }
+            }
+            else if (_contextMenuNode is IVfsFile ctxFile)
+            {
+                @* File context menu *@
+                @if (IsMediaFile(ctxFile))
+                {
+                    <button class="ctx-item" @onclick="@(() => { var f = (IVfsFile)_contextMenuNode!; CloseContextMenu(); PlayFile(f); })">▶ Play</button>
+                }
+                @if (IsRenamable(_contextMenuNode))
+                {
+                    <button class="ctx-item" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); ShowRenamePrompt(n); })">✏ Rename</button>
+                }
+                @if (IsMediaFile(ctxFile))
+                {
+                    <button class="ctx-item" @onclick="@(() => { var f = (IVfsFile)_contextMenuNode!; CloseContextMenu(); ShowAddToPlaylistPicker(f); })">🎵 Add to Playlist</button>
+                }
+                @if (IsDeletable(_contextMenuNode))
+                {
+                    <div class="ctx-divider"></div>
+                    <button class="ctx-item ctx-danger" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); _ = DeleteNode(n); })">🗑 Delete</button>
+                }
+            }
+        </div>
+    }
+
+    @* === Import mode prompt modal === *@
+    @if (ShowImportModePrompt)
+    {
+        <div class="modal-overlay" @onclick="CancelImportModePrompt">
+            <div class="dialog-panel" @onclick:stopPropagation="true" @onclick="@(() => { })">
+                <h3>📁 Import Files</h3>
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:1rem;">
+                    How would you like to add these files?
+                </p>
+                <div style="display:flex; flex-direction:column; gap:0.75rem;">
+                    <button class="btn" style="text-align:left; padding:0.75rem 1rem; width:100%; box-sizing:border-box; white-space:normal;" @onclick="@(() => ConfirmImportMode(ImportMode.Copy))">
+                        <div style="font-weight:600;">📋 Copy into library</div>
+                        <div style="font-size:0.8rem; color:var(--text-muted); margin-top:0.25rem;">Files are stored in the app. Works offline.</div>
+                    </button>
+                    <button class="btn" style="text-align:left; padding:0.75rem 1rem; width:100%; box-sizing:border-box; white-space:normal;" @onclick="@(() => ConfirmImportMode(ImportMode.Link))">
+                        <div style="font-weight:600;">🔗 Link in library</div>
+                        <div style="font-size:0.8rem; color:var(--text-muted); margin-top:0.25rem;">References the original files. No extra storage used.</div>
+                    </button>
+                </div>
+                <div style="display:flex; justify-content:flex-end; margin-top:1rem;">
+                    <button class="btn" @onclick="CancelImportModePrompt">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* === Folder name prompt modal === *@
+    @if (ShowFolderNamePrompt)
+    {
+        <div class="modal-overlay" @onclick="CancelFolderPrompt">
+            <div class="dialog-panel" @onclick:stopPropagation="true" @onclick="@(() => { })">
+                <h3>📂 Link Folder</h3>
+                <input type="text" class="form-control" @bind="FolderDisplayName" @onkeydown="OnFolderNameKey"
+                    placeholder="Display name" autofocus />
+                <label style="display:flex; align-items:center; gap:0.5rem; margin-top:0.75rem; font-size:0.85rem; color:var(--text-muted); cursor:pointer;">
+                    <input type="checkbox" @bind="FolderReadOnly" />
+                    Mount as read-only
+                </label>
+                <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;">
+                    <button class="btn" @onclick="CancelFolderPrompt">Cancel</button>
+                    <button class="btn btn-primary" @onclick="ConfirmFolderLink">Link</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* === New Folder prompt modal === *@
+    @if (ShowNewFolderPrompt_)
+    {
+        <div class="modal-overlay" @onclick="CancelNewFolderPrompt">
+            <div class="dialog-panel" @onclick:stopPropagation="true" @onclick="@(() => { })">
+                <h3>📁 New Folder</h3>
+                <input type="text" class="form-control" @bind="NewFolderName" @onkeydown="OnNewFolderKey"
+                    placeholder="Folder name" autofocus />
+                <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;">
+                    <button class="btn" @onclick="CancelNewFolderPrompt">Cancel</button>
+                    <button class="btn btn-primary" @onclick="ConfirmNewFolder"
+                        disabled="@string.IsNullOrWhiteSpace(NewFolderName)">Create</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* === Rename modal === *@
+    @if (ShowRenamePrompt_)
+    {
+        <div class="modal-overlay" @onclick="CancelRename">
+            <div class="dialog-panel" @onclick:stopPropagation="true" @onclick="@(() => { })">
+                <h3>✏ Rename</h3>
+                <input type="text" class="form-control" @bind="RenameName" @onkeydown="OnRenameKey"
+                    placeholder="New name" autofocus />
+                <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;">
+                    <button class="btn" @onclick="CancelRename">Cancel</button>
+                    <button class="btn btn-primary" @onclick="ConfirmRename"
+                        disabled="@string.IsNullOrWhiteSpace(RenameName)">Rename</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* === New Playlist modal === *@
+    @if (ShowPlaylistPrompt_)
+    {
+        <div class="modal-overlay" @onclick="CancelPlaylistPrompt">
+            <div class="dialog-panel" @onclick:stopPropagation="true" @onclick="@(() => { })">
+                <h3>🎵 New Playlist</h3>
+                <input type="text" class="form-control" @bind="PlaylistName" @onkeydown="OnPlaylistKey"
+                    placeholder="Playlist name" autofocus />
+                <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;">
+                    <button class="btn" @onclick="CancelPlaylistPrompt">Cancel</button>
+                    <button class="btn btn-primary" @onclick="ConfirmNewPlaylist"
+                        disabled="@string.IsNullOrWhiteSpace(PlaylistName)">Create</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* === Add to Playlist picker modal === *@
+    @if (_showPlaylistPicker)
+    {
+        <div class="modal-overlay" @onclick="CancelPlaylistPicker">
+            <div class="dialog-panel" @onclick:stopPropagation="true" @onclick="@(() => { })">
+                <h3>🎵 Add to Playlist</h3>
+                @if (_availablePlaylists.Count == 0)
+                {
+                    <p style="color:var(--text-muted); font-size:0.85rem;">No playlists found in this directory. Create one first.</p>
+                }
+                else
+                {
+                    <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:0.5rem;">Select a playlist:</p>
+                    <div style="display:flex; flex-direction:column; gap:0.25rem; max-height:200px; overflow-y:auto;">
+                        @foreach (var pl in _availablePlaylists)
+                        {
+                            <button class="btn" style="text-align:left; width:100%; box-sizing:border-box;"
+                                    @onclick="@(() => _ = AddFileToPlaylist(pl))">
+                                🎵 @pl.Name
+                            </button>
+                        }
+                    </div>
+                }
+                <div style="display:flex; justify-content:flex-end; margin-top:1rem;">
+                    <button class="btn" @onclick="CancelPlaylistPicker">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* === Add Torrent modal === *@
+    @if (ShowTorrentPrompt)
+    {
+        <div class="modal-overlay" @onclick="CancelTorrentPrompt">
+            <div class="dialog-panel" @onclick:stopPropagation="true" @onclick="@(() => { })">
+                <h3>🧲 Add Torrent</h3>
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:1rem;">
+                    Paste a magnet link / info hash, or open a .torrent file.
+                </p>
+                <input type="text" class="form-control" @bind="TorrentSource"
+                    placeholder="magnet:?xt=urn:btih:... or info hash" autofocus
+                    style="margin-bottom:0.75rem;" />
+                <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.75rem;">
+                    <span style="color:var(--text-muted); font-size:0.85rem;">— or —</span>
+                    <label class="btn" style="margin:0; cursor:pointer;">
+                        📂 Open .torrent
+                        <InputFile accept=".torrent" OnChange="OnTorrentFileSelected"
+                            style="display:none;" />
+                    </label>
+                    @if (TorrentFile != null)
+                    {
+                        <span style="font-size:0.85rem; color:var(--text-muted);">@TorrentFile.Name</span>
+                    }
+                </div>
+                <input type="text" class="form-control" @bind="TorrentDisplayName"
+                    @onkeydown="OnTorrentKey"
+                    placeholder="Display name (optional)" />
+                <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;">
+                    <button class="btn" @onclick="CancelTorrentPrompt">Cancel</button>
+                    <button class="btn btn-primary" @onclick="ConfirmAddTorrent"
+                        disabled="@(HasNoTorrentInput || IsAddingTorrent)">
+                        @(IsAddingTorrent ? "Adding…" : "Add")
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    // === State ===
+    private static string CurrentPath = "/";
+    private static double _savedScrollTop;
+    private bool _shouldRestoreScroll;
+    private List<IVfsNode> CurrentNodes = new();
+    private bool IsLoading = true;
+    private bool IsDragOver;
+    private string? StatusMessage;
+    // Context menu
+    private bool _contextMenuVisible;
+    private double _contextMenuX;
+    private double _contextMenuY;
+    private IVfsNode? _contextMenuNode;
+    private System.Threading.Timer? _longPressTimer;
+    private IVfsNode? _longPressNode;
+
+    // New Playlist modal
+    private bool ShowPlaylistPrompt_;
+    private string PlaylistName = "";
+
+    // Import mode prompt
+    private bool ShowImportModePrompt;
+
+    // Folder linking modal
+    private bool ShowFolderNamePrompt;
+    private string FolderDisplayName = "";
+    private bool FolderReadOnly;
+    private FileSystemDirectoryHandle? _pendingHandle;
+
+    // New Folder modal
+    private bool ShowNewFolderPrompt_;
+    private string NewFolderName = "";
+
+    // Rename modal
+    private bool ShowRenamePrompt_;
+    private string RenameName = "";
+    private IVfsNode? _renameNode;
+
+    // Add Torrent modal
+    private bool ShowTorrentPrompt;
+    private string TorrentSource = "";
+    private string TorrentDisplayName = "";
+    private bool IsAddingTorrent;
+    private IBrowserFile? TorrentFile;
+    private bool HasNoTorrentInput => string.IsNullOrWhiteSpace(TorrentSource) && TorrentFile == null;
+
+    // Object URL cache removed — all files served via /vfs/ proxy
+
+    // Playlist picker
+    private bool _showPlaylistPicker;
+    private IVfsFile? _playlistPickerFile;
+    private List<IVfsFile> _availablePlaylists = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        MediaLibrary.OnChanged += Refresh;
+        MediaLibrary.VFS.OnMountsChanged += Refresh;
+        MediaLibrary.VFS.OnContentChanged += OnVfsContentChanged;
+        _shouldRestoreScroll = true;
+        await LoadCurrentPath();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_shouldRestoreScroll)
+        {
+            _shouldRestoreScroll = false;
+            try
+            {
+                await JS.InvokeVoidAsync("eval",
+                    $"document.querySelector('.library-page')?.scrollTo(0, {_savedScrollTop})");
+            }
+            catch { /* component may have been disposed */ }
+        }
+    }
+
+    private async void Refresh()
+    {
+        await LoadCurrentPath();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>Only refresh when VFS content changes under the currently viewed path.</summary>
+    private void OnVfsContentChanged(VfsChangeEventArgs args)
+    {
+        // Check if the changed path is under the current directory
+        if (args.Path.StartsWith(CurrentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            Refresh();
+        }
+    }
+
+    private async Task LoadCurrentPath()
+    {
+        IsLoading = true;
+        try
+        {
+            var nodes = await MediaLibrary.VFS.ListDirectoryAsync(CurrentPath);
+
+            CurrentNodes = nodes
+                .OrderBy(n => n.NodeType == VfsNodeType.File ? 1 : 0) // directories first
+                .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"VFS ListDirectory error: {ex.Message}");
+            CurrentNodes = new();
+        }
+        IsLoading = false;
+    }
+
+
+    // === Navigation ===
+
+    private async Task NavigateTo(string path)
+    {
+        await SaveScrollPosition();
+        CurrentPath = path;
+        await LoadCurrentPath();
+    }
+
+    private List<(string label, string path)> GetBreadcrumbs()
+    {
+        var crumbs = new List<(string, string)> { ("🏠 Root", "/") };
+        if (CurrentPath == "/") return crumbs;
+
+        var segments = CurrentPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var cumulative = "";
+        foreach (var seg in segments)
+        {
+            cumulative += $"/{seg}";
+            crumbs.Add((seg, cumulative));
+        }
+        return crumbs;
+    }
+
+    // === Actions ===
+
+    private async Task AddFiles()
+    {
+        // If browser supports FileSystemHandle, show import mode prompt
+        if (FileImport.SupportsFileSystemHandle)
+        {
+            ShowImportModePrompt = true;
+            return;
+        }
+
+        // No FileSystemHandle support — go straight to copy
+        StatusMessage = "Opening file picker...";
+        StateHasChanged();
+        try
+        {
+            await FileImport.ImportViaFilePickerAsync(ImportMode.Copy);
+            StatusMessage = null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"AddFiles error: {ex.Message}");
+            StatusMessage = "Cancelled or error.";
+        }
+    }
+
+    private async Task ConfirmImportMode(ImportMode mode)
+    {
+        // Note: do NOT call StateHasChanged() here — it consumes the
+        // transient user activation that showOpenFilePicker requires.
+        try
+        {
+            var imported = await FileImport.ImportViaFilePickerAsync(mode);
+            StatusMessage = imported.Count > 0
+                ? $"Imported {imported.Count} file(s) ({(mode == ImportMode.Link ? "linked" : "copied")})."
+                : null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ConfirmImportMode error: {ex.Message}");
+            StatusMessage = "Cancelled or error.";
+        }
+        ShowImportModePrompt = false;
+        if (StatusMessage != null)
+        {
+            StateHasChanged();
+            await Task.Delay(3000);
+            StatusMessage = null;
+        }
+    }
+
+    private void CancelImportModePrompt()
+    {
+        ShowImportModePrompt = false;
+    }
+
+    private async Task AddFolder()
+    {
+        StatusMessage = "Opening folder picker...";
+        StateHasChanged();
+        try
+        {
+            var (handle, folderName) = await FileImport.PickDirectoryForLinkingAsync();
+            _pendingHandle = handle;
+            if (_pendingHandle != null)
+            {
+                FolderDisplayName = folderName ?? _pendingHandle.Name;
+                ShowFolderNamePrompt = true;
+                StatusMessage = null;
+            }
+            else
+            {
+                StatusMessage = "Cancelled.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"AddFolder error: {ex.Message}");
+            StatusMessage = "Cancelled or error.";
+        }
+    }
+
+    private async Task ConfirmFolderLink()
+    {
+        if (_pendingHandle == null || string.IsNullOrWhiteSpace(FolderDisplayName)) return;
+        ShowFolderNamePrompt = false;
+        StatusMessage = "Linking folder...";
+        StateHasChanged();
+
+        var folder = new LinkedFolder
+        {
+            DisplayName = FolderDisplayName.Trim(),
+            OriginalName = _pendingHandle.Name
+        };
+
+        await MediaLibrary.AddLinkedFolderAsync(folder, _pendingHandle, FolderReadOnly, CurrentPath);
+        var wasReadOnly = FolderReadOnly;
+        _pendingHandle = null;
+        FolderReadOnly = false;
+        StatusMessage = $"Linked \"{folder.DisplayName}\"" + (wasReadOnly ? " (read-only)" : "");
+        await Task.Delay(2000);
+        StatusMessage = null;
+    }
+
+    private void CancelFolderPrompt()
+    {
+        ShowFolderNamePrompt = false;
+        FolderReadOnly = false;
+        _pendingHandle?.Dispose();
+        _pendingHandle = null;
+        StatusMessage = null;
+    }
+
+    private void OnFolderNameKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") _ = ConfirmFolderLink();
+    }
+
+    // === Torrent actions ===
+
+    private void ShowAddTorrentModal()
+    {
+        TorrentSource = "";
+        TorrentDisplayName = "";
+        ShowTorrentPrompt = true;
+    }
+
+    private void CancelTorrentPrompt()
+    {
+        ShowTorrentPrompt = false;
+        TorrentFile = null;
+    }
+
+    private void OnTorrentFileSelected(InputFileChangeEventArgs e)
+    {
+        TorrentFile = e.File;
+        // Auto-fill display name from file name if blank
+        if (string.IsNullOrWhiteSpace(TorrentDisplayName))
+        {
+            var name = TorrentFile.Name;
+            if (name.EndsWith(".torrent", StringComparison.OrdinalIgnoreCase))
+                name = name[..^8];
+            TorrentDisplayName = name;
+        }
+    }
+
+    private void OnTorrentKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !HasNoTorrentInput) _ = ConfirmAddTorrent();
+    }
+
+    private async Task ConfirmAddTorrent()
+    {
+        if (HasNoTorrentInput) return;
+        IsAddingTorrent = true;
+        ShowTorrentPrompt = false;
+        StatusMessage = "Adding torrent…";
+        StateHasChanged();
+
+        try
+        {
+            WebTorrentFsHandler? handler;
+            string name;
+
+            if (TorrentFile != null)
+            {
+                // .torrent file path
+                name = string.IsNullOrWhiteSpace(TorrentDisplayName)
+                    ? TorrentFile.Name : TorrentDisplayName.Trim();
+                using var stream = TorrentFile.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
+                using var ms = new MemoryStream();
+                await stream.CopyToAsync(ms);
+                handler = await WtManager.AddTorrentAsync(ms.ToArray(), name, CurrentPath);
+            }
+            else
+            {
+                // Magnet / info hash / URL
+                name = string.IsNullOrWhiteSpace(TorrentDisplayName)
+                    ? TorrentSource.Length > 40 ? TorrentSource[..40] + "…" : TorrentSource
+                    : TorrentDisplayName.Trim();
+                handler = await WtManager.AddTorrentAsync(TorrentSource.Trim(), name, CurrentPath);
+            }
+
+            StatusMessage = handler != null
+                ? $"Torrent \"{name}\" added!"
+                : "Failed to add torrent.";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"AddTorrent error: {ex.Message}");
+            StatusMessage = "Error adding torrent.";
+        }
+        TorrentFile = null;
+        IsAddingTorrent = false;
+        StateHasChanged();
+        await Task.Delay(3000);
+        StatusMessage = null;
+    }
+
+    private void PlayFile(IVfsFile file)
+    {
+        try
+        {
+            // Use /vfs/ URL — served by service worker proxy
+            var vfsUrl = "/vfs" + file.Path;
+            var mediaItem = new MediaItem
+            {
+                Title = file.Name,
+                SourceUri = vfsUrl,
+                MimeType = file.MimeType,
+                Type = MediaLibraryService.DetectMediaType(file.MimeType)
+            };
+
+            // Collect all playable files in current directory as a playlist
+            var playableFiles = CurrentNodes.OfType<IVfsFile>().ToList();
+            var items = playableFiles.Select(f => new MediaItem
+            {
+                Title = f.Name,
+                SourceUri = "/vfs" + f.Path,
+                MimeType = f.MimeType,
+                Type = MediaLibraryService.DetectMediaType(f.MimeType)
+            }).ToList();
+
+            NowPlaying.SetItems(items, items.FirstOrDefault(i => i.Title == file.Name)?.Id);
+            Navigation.NavigateTo("/player?fromFolder=true");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PlayFile error: {ex.Message}");
+            StatusMessage = "Error playing file.";
+        }
+    }
+
+    private async Task HandleDrop(DragEventArgs e)
+    {
+        IsDragOver = false;
+        // Note: Full drag-and-drop requires BlazorJS event listeners for DataTransfer access.
+        // Use the "Add Files" button to import media.
+        StatusMessage = "Use the ➕ Add Files button to import media.";
+        StateHasChanged();
+        await Task.Delay(3000);
+        StatusMessage = null;
+    }
+
+    private async Task UnlinkFolder(IVfsNode node)
+    {
+        // Extract display name from path (e.g. "/MyFolder" → "MyFolder")
+        var displayName = node.Path.TrimStart('/');
+        await MediaLibrary.RemoveLinkedFolderAsync(displayName);
+        StatusMessage = $"Unlinked \"{displayName}\"";
+        await Task.Delay(1500);
+        StatusMessage = null;
+    }
+
+    // === New Folder ===
+
+    private void ShowNewFolderPrompt()
+    {
+        NewFolderName = "";
+        ShowNewFolderPrompt_ = true;
+    }
+
+    private void CancelNewFolderPrompt()
+    {
+        ShowNewFolderPrompt_ = false;
+        NewFolderName = "";
+    }
+
+    private void OnNewFolderKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(NewFolderName)) _ = ConfirmNewFolder();
+    }
+
+    private async Task ConfirmNewFolder()
+    {
+        if (string.IsNullOrWhiteSpace(NewFolderName)) return;
+        ShowNewFolderPrompt_ = false;
+        var name = NewFolderName.Trim();
+        var vfsPath = CurrentPath == "/" ? $"/{name}" : $"{CurrentPath}/{name}";
+
+        try
+        {
+            await MediaLibrary.VFS.CreateDirectoryAsync(vfsPath);
+            StatusMessage = $"Created folder \"{name}\"";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ConfirmNewFolder error: {ex.Message}");
+            StatusMessage = "Error creating folder.";
+        }
+        StateHasChanged();
+        await Task.Delay(2000);
+        StatusMessage = null;
+    }
+
+    // === Delete ===
+
+    private async Task DeleteNode(IVfsNode node)
+    {
+        try
+        {
+            // If this is a mount point, use proper service cleanup
+            if (node.Handler is FileSystemAccessFsHandler)
+            {
+                await UnlinkFolder(node);
+                return;
+            }
+            else if (node.Handler is WebTorrentFsHandler wtHandler && wtHandler.TorrentSource != null)
+            {
+                await WtManager.RemoveTorrentAsync(wtHandler.TorrentSource);
+                StatusMessage = $"Removed torrent \"{node.Name}\"";
+            }
+            else
+            {
+                // Regular VFS delete (e.g. OPFS file/folder)
+                await MediaLibrary.VFS.DeleteAsync(node.Path, recursive: true);
+                StatusMessage = $"Deleted \"{node.Name}\"";
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"DeleteNode error: {ex.Message}");
+            StatusMessage = "Error deleting item.";
+        }
+        StateHasChanged();
+        await Task.Delay(2000);
+        StatusMessage = null;
+    }
+
+    // === Helpers ===
+
+    private bool IsUnlinkable(IVfsNode node)
+    {
+        return node.Handler is FileSystemAccessFsHandler;
+    }
+
+    private bool IsDeletable(IVfsNode node)
+    {
+        // A node is deletable if the directory containing it is writable.
+        // This means mounts are deletable (their .mount file is in OPFS)
+        // even if the mount contents are read-only.
+        var parentPath = node.Path.Contains('/')
+            ? node.Path[..node.Path.LastIndexOf('/')]
+            : "/";
+        if (string.IsNullOrEmpty(parentPath)) parentPath = "/";
+        return MediaLibrary.VFS.IsWritable(parentPath);
+    }
+
+    private bool IsRenamable(IVfsNode node)
+    {
+        // Only items inside a writable handler can be renamed
+        return node.Handler is IWritableFsHandler;
+    }
+
+    private void ShowRenamePrompt(IVfsNode node)
+    {
+        _renameNode = node;
+        RenameName = node.Name;
+        ShowRenamePrompt_ = true;
+    }
+
+    private void CancelRename()
+    {
+        ShowRenamePrompt_ = false;
+        _renameNode = null;
+        RenameName = "";
+    }
+
+    private void OnRenameKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(RenameName)) _ = ConfirmRename();
+    }
+
+    private async Task ConfirmRename()
+    {
+        if (_renameNode == null || string.IsNullOrWhiteSpace(RenameName)) return;
+        var node = _renameNode;
+        var newName = RenameName.Trim();
+        ShowRenamePrompt_ = false;
+        _renameNode = null;
+
+        try
+        {
+            await MediaLibrary.VFS.RenameAsync(node.Path, newName);
+            StatusMessage = $"Renamed \"{node.Name}\" → \"{newName}\"";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ConfirmRename error: {ex.Message}");
+            StatusMessage = "Error renaming item.";
+        }
+        StateHasChanged();
+        await Task.Delay(2000);
+        StatusMessage = null;
+    }
+
+    private string GetHandlerLabel(IVfsNode node)
+    {
+        return node.Handler.HandlerType switch
+        {
+            "memory" => "Library",
+            "filesystem-access" => "Linked",
+            "webtorrent" => "Torrent",
+            "opfs" => "Local",
+            _ => "Folder"
+        };
+    }
+
+    private string GetFileEmoji(IVfsFile file)
+    {
+        return file.MimeType?.Split('/')[0] switch
+        {
+            "video" => "🎬",
+            "audio" => "🎵",
+            "image" => "🖼",
+            _ => "📄"
+        };
+    }
+
+    private string GetBadgeClass(IVfsFile file)
+    {
+        return file.MimeType?.Split('/')[0] switch
+        {
+            "video" => "badge-video",
+            "audio" => "badge-audio",
+            "image" => "badge-image",
+            _ => ""
+        };
+    }
+
+    private string GetMediaTypeLabel(IVfsFile file)
+    {
+        return file.MimeType?.Split('/')[0] switch
+        {
+            "video" => "Video",
+            "audio" => "Audio",
+            "image" => "Image",
+            _ => "File"
+        };
+    }
+
+    private string GetVfsUrl(IVfsFile file)
+    {
+        return "/vfs" + file.Path;
+    }
+
+    private string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+    }
+
+    private async Task SaveScrollPosition()
+    {
+        try
+        {
+            _savedScrollTop = await JS.InvokeAsync<double>("eval",
+                "document.querySelector('.library-page')?.scrollTop ?? 0");
+        }
+        catch { /* ignore if DOM not ready */ }
+    }
+
+    // === Context Menu ===
+
+    private void OpenContextMenu(MouseEventArgs e, IVfsNode node)
+    {
+        _contextMenuNode = node;
+        _contextMenuX = e.ClientX;
+        _contextMenuY = e.ClientY;
+        _contextMenuVisible = true;
+        StateHasChanged();
+    }
+
+    private void OnBackgroundContext(MouseEventArgs e)
+    {
+        _contextMenuNode = null;
+        _contextMenuX = e.ClientX;
+        _contextMenuY = e.ClientY;
+        _contextMenuVisible = true;
+        StateHasChanged();
+    }
+
+    private void CloseContextMenu()
+    {
+        _contextMenuVisible = false;
+        _contextMenuNode = null;
+    }
+
+    // === Long-press for touch ===
+
+    private void OnTouchStart(TouchEventArgs e, IVfsNode node)
+    {
+        _longPressNode = node;
+        _longPressTimer?.Dispose();
+        _longPressTimer = new System.Threading.Timer(_ =>
+        {
+            InvokeAsync(() =>
+            {
+                if (_longPressNode == node)
+                {
+                    var touch = e.Touches.FirstOrDefault();
+                    _contextMenuNode = node;
+                    _contextMenuX = touch?.ClientX ?? 0;
+                    _contextMenuY = touch?.ClientY ?? 0;
+                    _contextMenuVisible = true;
+                    _longPressNode = null;
+                    StateHasChanged();
+                }
+            });
+        }, null, 600, System.Threading.Timeout.Infinite);
+    }
+
+    private void OnTouchEnd()
+    {
+        _longPressNode = null;
+        _longPressTimer?.Dispose();
+        _longPressTimer = null;
+    }
+
+    // === File Click Handler ===
+
+    private void OnFileClick(IVfsFile file)
+    {
+        if (IsPlaylist(file))
+        {
+            _ = LoadAndPlayPlaylist(file);
+        }
+        else if (IsMediaFile(file))
+        {
+            PlayFile(file);
+        }
+    }
+
+    private bool IsMediaFile(IVfsFile file)
+    {
+        var mime = file.MimeType ?? "";
+        return mime.StartsWith("video/") || mime.StartsWith("audio/") || mime.StartsWith("image/");
+    }
+
+    private bool IsPlaylist(IVfsFile file)
+    {
+        return file.Name.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
+            || file.Name.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsLocalHandler()
+    {
+        var handler = MediaLibrary.VFS.ResolveHandler(CurrentPath);
+        return handler is OpfsFsHandler or FileSystemAccessFsHandler;
+    }
+
+    // === Playlist ===
+
+    private void ShowNewPlaylistPrompt()
+    {
+        PlaylistName = "";
+        ShowPlaylistPrompt_ = true;
+    }
+
+    private void CancelPlaylistPrompt()
+    {
+        ShowPlaylistPrompt_ = false;
+        PlaylistName = "";
+    }
+
+    private void OnPlaylistKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !string.IsNullOrWhiteSpace(PlaylistName)) _ = ConfirmNewPlaylist();
+    }
+
+    private async Task ConfirmNewPlaylist()
+    {
+        if (string.IsNullOrWhiteSpace(PlaylistName)) return;
+        var name = PlaylistName.Trim();
+        if (!name.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+            name += ".m3u8";
+        ShowPlaylistPrompt_ = false;
+        PlaylistName = "";
+
+        try
+        {
+            var path = CurrentPath == "/" ? $"/{name}" : $"{CurrentPath}/{name}";
+            await MediaLibrary.VFS.WriteTextAsync(path, "#EXTM3U\n");
+            StatusMessage = $"Created playlist \"{name}\"";
+            await LoadCurrentPath();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ConfirmNewPlaylist error: {ex.Message}");
+            StatusMessage = "Error creating playlist.";
+        }
+        StateHasChanged();
+        await Task.Delay(2000);
+        StatusMessage = null;
+    }
+
+    private async Task LoadAndPlayPlaylist(IVfsFile file)
+    {
+        try
+        {
+            var content = await MediaLibrary.VFS.ReadTextAsync(file.Path);
+            if (content == null) return;
+
+            var items = new List<IVfsFile>();
+            var basePath = file.Path.Contains('/')
+                ? file.Path[..file.Path.LastIndexOf('/')]
+                : "/";
+
+            foreach (var line in content.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("#") || string.IsNullOrWhiteSpace(trimmed)) continue;
+
+                // Resolve relative or absolute VFS paths
+                var itemPath = trimmed.StartsWith("/")
+                    ? trimmed
+                    : (basePath == "/" ? $"/{trimmed}" : $"{basePath}/{trimmed}");
+
+                var node = await MediaLibrary.VFS.ResolveAsync(itemPath);
+                if (node is IVfsFile f)
+                {
+                    items.Add(f);
+                }
+            }
+
+            if (items.Count > 0)
+            {
+                PlayFile(items[0]);
+                StatusMessage = $"Playing playlist \"{file.Name}\" ({items.Count} items)";
+                StateHasChanged();
+                await Task.Delay(2000);
+                StatusMessage = null;
+            }
+            else
+            {
+                StatusMessage = "Playlist is empty.";
+                StateHasChanged();
+                await Task.Delay(2000);
+                StatusMessage = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"LoadAndPlayPlaylist error: {ex.Message}");
+            StatusMessage = "Error loading playlist.";
+            StateHasChanged();
+            await Task.Delay(2000);
+            StatusMessage = null;
+        }
+    }
+
+    // === Add to Playlist ===
+
+    private void ShowAddToPlaylistPicker(IVfsFile file)
+    {
+        _playlistPickerFile = file;
+        _availablePlaylists = CurrentNodes
+            .OfType<IVfsFile>()
+            .Where(f => IsPlaylist(f))
+            .ToList();
+        _showPlaylistPicker = true;
+        StateHasChanged();
+    }
+
+    private void CancelPlaylistPicker()
+    {
+        _showPlaylistPicker = false;
+        _playlistPickerFile = null;
+    }
+
+    private async Task AddFileToPlaylist(IVfsFile playlist)
+    {
+        if (_playlistPickerFile == null) return;
+        var filePath = _playlistPickerFile.Path;
+        _showPlaylistPicker = false;
+        _playlistPickerFile = null;
+
+        try
+        {
+            // Read existing content
+            var existing = await MediaLibrary.VFS.ReadTextAsync(playlist.Path) ?? "";
+
+            // Compute relative path from playlist dir to file
+            var playlistDir = playlist.Path.Contains('/')
+                ? playlist.Path[..playlist.Path.LastIndexOf('/')]
+                : "/";
+            string entry;
+            if (filePath.StartsWith(playlistDir + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                entry = filePath[(playlistDir.Length + 1)..];
+            }
+            else
+            {
+                entry = filePath; // absolute VFS path fallback
+            }
+
+            // Append entry
+            var newContent = existing.TrimEnd() + "\n" + entry + "\n";
+            await MediaLibrary.VFS.WriteTextAsync(playlist.Path, newContent);
+
+            StatusMessage = $"Added to \"{playlist.Name}\"";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"AddFileToPlaylist error: {ex.Message}");
+            StatusMessage = "Error adding to playlist.";
+        }
+        StateHasChanged();
+        await Task.Delay(2000);
+        StatusMessage = null;
+    }
+
+    public void Dispose()
+    {
+        _ = SaveScrollPosition();
+        _longPressTimer?.Dispose();
+        MediaLibrary.OnChanged -= Refresh;
+        MediaLibrary.VFS.OnMountsChanged -= Refresh;
+        MediaLibrary.VFS.OnContentChanged -= OnVfsContentChanged;
+    }
+}

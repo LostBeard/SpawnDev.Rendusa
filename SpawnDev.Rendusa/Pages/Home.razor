@@ -1,0 +1,93 @@
+﻿@page "/"
+@inject MediaLibraryService MediaLibrary
+
+<PageTitle>Rendusa — Media Player</PageTitle>
+
+<div class="home-page animate-fade">
+    <div class="hero">
+        <div class="hero-icon">🎬</div>
+        <h1>Welcome to Rendusa</h1>
+        <p class="hero-subtitle">Your 2D &amp; 3D media player powered by GPU rendering</p>
+    </div>
+
+    <div class="quick-actions">
+        <a href="library" class="action-card">
+            <span class="action-icon">📁</span>
+            <span class="action-title">Media Library</span>
+            <span class="action-desc">@MediaLibrary.MediaItems.Count items</span>
+        </a>
+        <a href="player" class="action-card">
+            <span class="action-icon">▶</span>
+            <span class="action-title">Player</span>
+            <span class="action-desc">Open the media player</span>
+        </a>
+        <a href="settings" class="action-card">
+            <span class="action-icon">⚙</span>
+            <span class="action-title">Settings</span>
+            <span class="action-desc">Configure Rendusa</span>
+        </a>
+    </div>
+
+    @if (RecentItems.Any())
+    {
+        <div class="section">
+            <h3>Recently Added</h3>
+            <div class="media-grid">
+                @foreach (var item in RecentItems)
+                {
+                    <div class="media-card" @onclick="() => PlayItem(item)">
+                        <div class="thumbnail">
+                            @if (!string.IsNullOrEmpty(item.ThumbnailDataUrl))
+                            {
+                                <img src="@item.ThumbnailDataUrl" alt="@item.Title" />
+                            }
+                            else
+                            {
+                                <span>@GetMediaIcon(item.Type)</span>
+                            }
+                        </div>
+                        <div class="card-info">
+                            <div class="card-title">@item.Title</div>
+                            <div class="card-meta">
+                                <span class="badge @GetBadgeClass(item.Type)">@item.Type</span>
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private List<MediaItem> RecentItems => MediaLibrary.MediaItems
+        .OrderByDescending(m => m.DateAdded)
+        .Take(8)
+        .ToList();
+
+    protected override void OnInitialized()
+    {
+    }
+
+    private void PlayItem(MediaItem item)
+    {
+        // Navigate to player with this item
+        // Will be wired up when player supports URL-based item selection
+    }
+
+    private string GetMediaIcon(MediaType type) => type switch
+    {
+        MediaType.Video => "🎬",
+        MediaType.Audio => "🎵",
+        MediaType.Image => "🖼",
+        _ => "📄"
+    };
+
+    private string GetBadgeClass(MediaType type) => type switch
+    {
+        MediaType.Video => "badge-video",
+        MediaType.Audio => "badge-audio",
+        MediaType.Image => "badge-image",
+        _ => ""
+    };
+}

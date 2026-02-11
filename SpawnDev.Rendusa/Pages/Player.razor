@@ -1,0 +1,39 @@
+@page "/player"
+@inject MediaLibraryService MediaLibrary
+@inject NowPlayingService NowPlaying
+@inject NavigationManager Navigation
+@inject VfsServiceWorkerBridge VfsBridge
+
+<PageTitle>Rendusa — Player</PageTitle>
+
+<div class="player-page">
+    <div class="player-area">
+        <MediaPlayer Items="@PlayerItems" StartItemId="@ItemId" />
+    </div>
+</div>
+
+@code {
+    private string? ItemId;
+    private List<MediaItem> PlayerItems = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Read query parameters
+        var uri = Navigation.ToAbsoluteUri(Navigation.Uri);
+        var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+        var fromFolder = query["fromFolder"];
+
+        if (fromFolder == "true" && NowPlaying.IsFromFolder && NowPlaying.Items.Any())
+        {
+            // Playing items from a linked folder (ephemeral, not in library)
+            PlayerItems = NowPlaying.Items;
+            ItemId = NowPlaying.StartItemId;
+        }
+        else
+        {
+            // Normal library playback
+            PlayerItems = MediaLibrary.MediaItems;
+            ItemId = query["itemId"];
+        }
+    }
+}

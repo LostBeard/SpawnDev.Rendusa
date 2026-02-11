@@ -1,0 +1,24 @@
+.library-page {
+    flex: 1;
+}
+
+/* Modal overlay — covers viewport, acts as backdrop + click-to-dismiss */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+}
+
+/* Dialog panel — avoids Bootstrap .modal-dialog collision */
+.dialog-panel {
+    background: var(--surface, #1e1e2e);
+    border-radius: 12px;
+    padding: 1.5rem;
+    min-width: 320px;
+    max-width: 90vw;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}

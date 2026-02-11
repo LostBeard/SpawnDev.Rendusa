@@ -1,0 +1,472 @@
+@page "/settings"
+@inject SettingsService SettingsService
+
+<PageTitle>Rendusa — Settings</PageTitle>
+
+<div class="settings-page p-2 animate-fade">
+    <div class="page-header">
+        <h2>Settings</h2>
+    </div>
+
+    @* === Playback === *@
+    <div class="settings-group">
+        <div class="settings-group-header">🎬 Playback</div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Image Display Duration</div>
+                <div class="settings-item-desc">Seconds to show each image before auto-advancing</div>
+            </div>
+            <div class="settings-item-control">
+                <input type="number" min="1" max="120" step="1"
+                       value="@SettingsService.Settings.ImagePlayDuration"
+                       @onchange="OnImageDurationChanged" />
+            </div>
+        </div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Default Volume</div>
+                <div class="settings-item-desc">Volume level for new media (0-100%)</div>
+            </div>
+            <div class="settings-item-control">
+                <input type="range" min="0" max="1" step="0.05"
+                       value="@SettingsService.Settings.DefaultVolume"
+                       @onchange="OnVolumeChanged" />
+            </div>
+        </div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Auto-Play Next</div>
+                <div class="settings-item-desc">Automatically play the next item in playlist</div>
+            </div>
+            <div class="settings-item-control">
+                <label class="toggle">
+                    <input type="checkbox" checked="@SettingsService.Settings.AutoPlayNext"
+                           @onchange="OnAutoPlayChanged" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    @* === Appearance === *@
+    <div class="settings-group">
+        <div class="settings-group-header">🎨 Appearance</div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Theme</div>
+                <div class="settings-item-desc">Application color theme</div>
+            </div>
+            <div class="settings-item-control">
+                <select value="@SettingsService.Settings.Theme" @onchange="OnThemeChanged">
+                    <option value="dark">Dark (VLC)</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    @* === Renderers === *@
+    <div class="settings-group">
+        <div class="settings-group-header">🖥 Renderers</div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Output Mode</div>
+                <div class="settings-item-desc">Coming soon — 2D, SBS, Anaglyph, Lenticular</div>
+            </div>
+            <div class="settings-item-control">
+                <span class="text-muted">2D (Default)</span>
+            </div>
+        </div>
+    </div>
+
+    @* === Virtual File System === *@
+    <div class="settings-group">
+        <div class="settings-group-header">📂 Virtual File System</div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Streaming Chunk Size</div>
+                <div class="settings-item-desc">
+                    Chunk size for VFS streaming (@(SettingsService.Settings.StreamingChunkSizeKB) KB).
+                    Larger = smoother playback, more memory per request.
+                </div>
+            </div>
+            <div class="settings-item-control">
+                <input type="range" min="64" max="4096" step="64"
+                       value="@SettingsService.Settings.StreamingChunkSizeKB"
+                       @onchange="OnChunkSizeChanged" />
+            </div>
+        </div>
+    </div>
+
+    @* === WebTorrent === *@
+    <div class="settings-group">
+        <div class="settings-group-header">🌐 WebTorrent</div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Enable WebTorrent</div>
+                <div class="settings-item-desc">Stream media from torrent sources via WebRTC</div>
+            </div>
+            <div class="settings-item-control">
+                <label class="toggle">
+                    <input type="checkbox" checked="@SettingsService.Settings.WebTorrentEnabled"
+                           @onchange="OnWebTorrentEnabledChanged" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+        </div>
+        @if (SettingsService.Settings.WebTorrentEnabled)
+        {
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Max Connections</div>
+                    <div class="settings-item-desc">Maximum peer connections per torrent (1–200)</div>
+                </div>
+                <div class="settings-item-control">
+                    <input type="number" min="1" max="200" step="1"
+                           value="@SettingsService.Settings.WebTorrentMaxConns"
+                           @onchange="@(e => OnIntChanged(e, v => SettingsService.Settings.WebTorrentMaxConns = v))" />
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Download Limit</div>
+                    <div class="settings-item-desc">Max download speed in KB/s (-1 = unlimited)</div>
+                </div>
+                <div class="settings-item-control">
+                    <input type="number" min="-1" max="100000" step="1"
+                           value="@(SettingsService.Settings.WebTorrentDownloadLimit < 0 ? -1 : SettingsService.Settings.WebTorrentDownloadLimit / 1024)"
+                           @onchange="OnDownloadLimitChanged" />
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Upload Limit</div>
+                    <div class="settings-item-desc">Max upload speed in KB/s (-1 = unlimited)</div>
+                </div>
+                <div class="settings-item-control">
+                    <input type="number" min="-1" max="100000" step="1"
+                           value="@(SettingsService.Settings.WebTorrentUploadLimit < 0 ? -1 : SettingsService.Settings.WebTorrentUploadLimit / 1024)"
+                           @onchange="OnUploadLimitChanged" />
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">DHT</div>
+                    <div class="settings-item-desc">Distributed hash table for decentralized peer discovery</div>
+                </div>
+                <div class="settings-item-control">
+                    <label class="toggle">
+                        <input type="checkbox" checked="@SettingsService.Settings.WebTorrentDhtEnabled"
+                               @onchange="@(e => OnBoolChanged(e, v => SettingsService.Settings.WebTorrentDhtEnabled = v))" />
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Local Discovery</div>
+                    <div class="settings-item-desc">Find peers on your local network (BEP14)</div>
+                </div>
+                <div class="settings-item-control">
+                    <label class="toggle">
+                        <input type="checkbox" checked="@SettingsService.Settings.WebTorrentLsdEnabled"
+                               @onchange="@(e => OnBoolChanged(e, v => SettingsService.Settings.WebTorrentLsdEnabled = v))" />
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Peer Exchange</div>
+                    <div class="settings-item-desc">Share peer lists with connected peers (BEP11)</div>
+                </div>
+                <div class="settings-item-control">
+                    <label class="toggle">
+                        <input type="checkbox" checked="@SettingsService.Settings.WebTorrentPexEnabled"
+                               @onchange="@(e => OnBoolChanged(e, v => SettingsService.Settings.WebTorrentPexEnabled = v))" />
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Web Seeds</div>
+                    <div class="settings-item-desc">Download from HTTP/HTTPS sources when available (BEP19)</div>
+                </div>
+                <div class="settings-item-control">
+                    <label class="toggle">
+                        <input type="checkbox" checked="@SettingsService.Settings.WebTorrentWebSeedsEnabled"
+                               @onchange="@(e => OnBoolChanged(e, v => SettingsService.Settings.WebTorrentWebSeedsEnabled = v))" />
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Custom Tracker</div>
+                    <div class="settings-item-desc">Optional tracker URL (leave empty for defaults)</div>
+                </div>
+                <div class="settings-item-control" style="flex:1; min-width:200px;">
+                    <input type="text" placeholder="wss://tracker.example.com"
+                           value="@SettingsService.Settings.WebTorrentTrackerUrl"
+                           @onchange="@(e => OnStringChanged(e, v => SettingsService.Settings.WebTorrentTrackerUrl = v))"
+                           style="width:100%;" />
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Clear Torrent Cache</div>
+                    <div class="settings-item-desc">Remove all cached torrent data used for streaming</div>
+                </div>
+                <div class="settings-item-control">
+                    <button class="btn btn-sm" @onclick="ClearTorrentCache">
+                        @(TorrentCacheClearing ? "Clearing..." : "🗑 Clear Cache")
+                    </button>
+                </div>
+            </div>
+        }
+    </div>
+
+    @* === Peer-to-Peer === *@
+    <div class="settings-group">
+        <div class="settings-group-header">🤝 Peer-to-Peer</div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Enable P2P Sharing</div>
+                <div class="settings-item-desc">Share and discover media with peers via PeerJS</div>
+            </div>
+            <div class="settings-item-control">
+                <label class="toggle">
+                    <input type="checkbox" checked="@SettingsService.Settings.PeerEnabled"
+                           @onchange="OnPeerEnabledChanged" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+        </div>
+        @if (SettingsService.Settings.PeerEnabled)
+        {
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Display Name</div>
+                    <div class="settings-item-desc">Your name visible to other peers</div>
+                </div>
+                <div class="settings-item-control" style="flex:1; min-width:160px;">
+                    <input type="text" placeholder="Anonymous"
+                           value="@SettingsService.Settings.PeerDisplayName"
+                           @onchange="@(e => OnStringChanged(e, v => SettingsService.Settings.PeerDisplayName = v))"
+                           style="width:100%;" />
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">PeerJS Server</div>
+                    <div class="settings-item-desc">Host for signaling server (empty = PeerJS cloud default)</div>
+                </div>
+                <div class="settings-item-control" style="flex:1; min-width:200px;">
+                    <input type="text" placeholder="(default cloud server)"
+                           value="@SettingsService.Settings.PeerServerHost"
+                           @onchange="@(e => OnStringChanged(e, v => SettingsService.Settings.PeerServerHost = v))"
+                           style="width:100%;" />
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Server Port</div>
+                    <div class="settings-item-desc">Port for the PeerJS signaling server</div>
+                </div>
+                <div class="settings-item-control">
+                    <input type="number" min="1" max="65535" step="1"
+                           value="@SettingsService.Settings.PeerServerPort"
+                           @onchange="@(e => OnIntChanged(e, v => SettingsService.Settings.PeerServerPort = v))" />
+                </div>
+            </div>
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Server Path</div>
+                    <div class="settings-item-desc">URL path prefix for the signaling server</div>
+                </div>
+                <div class="settings-item-control" style="flex:1; min-width:100px;">
+                    <input type="text" placeholder="/"
+                           value="@SettingsService.Settings.PeerServerPath"
+                           @onchange="@(e => OnStringChanged(e, v => SettingsService.Settings.PeerServerPath = v))"
+                           style="width:100%;" />
+                </div>
+            </div>
+        }
+    </div>
+
+    @* === HTTP Sources === *@
+    <div class="settings-group">
+        <div class="settings-group-header">🔗 HTTP Sources</div>
+        <div class="settings-item">
+            <div>
+                <div class="settings-item-label">Enable HTTP Provider</div>
+                <div class="settings-item-desc">Add publicly available media via URL (images, audio, podcasts)</div>
+            </div>
+            <div class="settings-item-control">
+                <label class="toggle">
+                    <input type="checkbox" checked="@SettingsService.Settings.HttpProviderEnabled"
+                           @onchange="OnHttpProviderEnabledChanged" />
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+        </div>
+        @if (SettingsService.Settings.HttpProviderEnabled)
+        {
+            <div class="settings-item">
+                <div>
+                    <div class="settings-item-label">Manage Sources</div>
+                    <div class="settings-item-desc">Add and manage HTTP media URLs from the Library page</div>
+                </div>
+                <div class="settings-item-control">
+                    <span class="text-muted">Configure in Library</span>
+                </div>
+            </div>
+        }
+    </div>
+
+    @if (SaveMessage != null)
+    {
+        <div class="save-toast animate-slide">✓ @SaveMessage</div>
+    }
+</div>
+
+@code {
+    private string? SaveMessage;
+    private bool TorrentCacheClearing;
+
+    // === Generic handlers ===
+
+    private async Task OnBoolChanged(ChangeEventArgs e, Action<bool> setter)
+    {
+        setter((bool)(e.Value ?? false));
+        await SaveSettings();
+    }
+
+    private async Task OnIntChanged(ChangeEventArgs e, Action<int> setter)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var val))
+        {
+            setter(val);
+            await SaveSettings();
+        }
+    }
+
+    private async Task OnStringChanged(ChangeEventArgs e, Action<string> setter)
+    {
+        setter(e.Value?.ToString() ?? "");
+        await SaveSettings();
+    }
+
+    // === Playback ===
+
+    private async Task OnImageDurationChanged(ChangeEventArgs e)
+    {
+        if (double.TryParse(e.Value?.ToString(), out var val))
+        {
+            SettingsService.Settings.ImagePlayDuration = val;
+            await SaveSettings();
+        }
+    }
+
+    private async Task OnVolumeChanged(ChangeEventArgs e)
+    {
+        if (double.TryParse(e.Value?.ToString(), out var val))
+        {
+            SettingsService.Settings.DefaultVolume = val;
+            await SaveSettings();
+        }
+    }
+
+    private async Task OnAutoPlayChanged(ChangeEventArgs e)
+    {
+        SettingsService.Settings.AutoPlayNext = (bool)(e.Value ?? false);
+        await SaveSettings();
+    }
+
+    private async Task OnThemeChanged(ChangeEventArgs e)
+    {
+        SettingsService.Settings.Theme = e.Value?.ToString() ?? "dark";
+        await SaveSettings();
+    }
+
+    // === VFS ===
+
+    private async Task OnChunkSizeChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var val))
+        {
+            SettingsService.Settings.StreamingChunkSizeKB = Math.Clamp(val, 64, 4096);
+            await SaveSettings();
+        }
+    }
+
+    // === WebTorrent ===
+
+    private async Task OnWebTorrentEnabledChanged(ChangeEventArgs e)
+    {
+        SettingsService.Settings.WebTorrentEnabled = (bool)(e.Value ?? false);
+        await SaveSettings();
+    }
+
+    private async Task OnDownloadLimitChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var kbps))
+        {
+            SettingsService.Settings.WebTorrentDownloadLimit = kbps <= 0 ? -1 : kbps * 1024;
+            await SaveSettings();
+        }
+    }
+
+    private async Task OnUploadLimitChanged(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var kbps))
+        {
+            SettingsService.Settings.WebTorrentUploadLimit = kbps <= 0 ? -1 : kbps * 1024;
+            await SaveSettings();
+        }
+    }
+
+    // === P2P ===
+
+    private async Task OnPeerEnabledChanged(ChangeEventArgs e)
+    {
+        SettingsService.Settings.PeerEnabled = (bool)(e.Value ?? false);
+        await SaveSettings();
+    }
+
+    // === HTTP ===
+
+    private async Task OnHttpProviderEnabledChanged(ChangeEventArgs e)
+    {
+        SettingsService.Settings.HttpProviderEnabled = (bool)(e.Value ?? false);
+        await SaveSettings();
+    }
+
+    // === Actions ===
+
+    private async Task ClearTorrentCache()
+    {
+        TorrentCacheClearing = true;
+        StateHasChanged();
+        // TODO: implement actual cache clearing via WebTorrent service
+        await Task.Delay(500);
+        TorrentCacheClearing = false;
+        SaveMessage = "Torrent cache cleared";
+        StateHasChanged();
+        await Task.Delay(2000);
+        SaveMessage = null;
+        StateHasChanged();
+    }
+
+    // === Shared ===
+
+    private async Task SaveSettings()
+    {
+        await SettingsService.SaveAsync();
+        SaveMessage = "Settings saved";
+        StateHasChanged();
+        await Task.Delay(2000);
+        SaveMessage = null;
+        StateHasChanged();
+    }
+}

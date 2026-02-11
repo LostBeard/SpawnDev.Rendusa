@@ -1,0 +1,19 @@
+﻿@inherits LayoutComponentBase
+
+<div class="rendusa-app">
+    <aside class="sidebar @(SidebarCollapsed ? "collapsed" : "")">
+        <NavMenu OnToggleSidebar="ToggleSidebar" />
+    </aside>
+    <main class="main-content">
+        @Body
+    </main>
+</div>
+
+@code {
+    private bool SidebarCollapsed = false;
+
+    private void ToggleSidebar()
+    {
+        SidebarCollapsed = !SidebarCollapsed;
+    }
+}

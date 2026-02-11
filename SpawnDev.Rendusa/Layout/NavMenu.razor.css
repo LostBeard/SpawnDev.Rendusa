@@ -1,0 +1,98 @@
+.nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.brand-icon {
+    font-size: 1.3rem;
+}
+
+.brand-text {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--accent);
+    flex: 1;
+    letter-spacing: 0.5px;
+}
+
+.toggle-btn {
+    font-size: 1rem;
+    padding: 0.3rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+
+.nav-menu {
+    padding: 0.5rem 0;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.55rem 1rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: all 150ms ease;
+    border-left: 3px solid transparent;
+}
+
+.nav-item:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.nav-item.active {
+    color: var(--accent);
+    background: var(--accent-glow);
+    border-left-color: var(--accent);
+}
+
+.nav-icon {
+    font-size: 1rem;
+    min-width: 20px;
+    text-align: center;
+}
+
+.nav-section-label {
+    padding: 1rem 1rem 0.4rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+}
+
+.playlist-sidebar {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 0 0.5rem 0;
+}
+
+.playlist-empty {
+    padding: 0.5rem 1rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.playlist-item {
+    font-size: 0.8rem;
+}
+
+.nav-footer {
+    padding: 0.5rem 1rem;
+    border-top: 1px solid var(--border-color);
+    margin-top: auto;
+}
+
+.nav-footer-text {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    text-align: center;
+}

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<CompressionEnabled>false</CompressionEnabled>
+		<OverrideHtmlAssetPlaceholders>true</OverrideHtmlAssetPlaceholders>
+		<ServiceWorkerAssetsManifest>service-worker-assets.js</ServiceWorkerAssetsManifest>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.2" />
+		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.2" PrivateAssets="all" />
+		<!-- Provides access to various browser APIs and JavaScript interop functionalities, used for integrating with browser features and third-party JavaScript libraries in Rendusa -->
+		<PackageReference Include="SpawnDev.BlazorJS" Version="2.66.0" />
+		<!-- Provides access to ILGPU for GPU-accelerated computations in the browser using WebGPU, used for performance-critical tasks such as real-time video processing, physics simulations, and other computationally intensive operations in Rendusa -->
+		<PackageReference Include="SpawnDev.ILGPU" Version="2.0.0" />
+		<!-- Allows accessing Rendusa's Virtual File System from a folder on Windows -->
+		<PackageReference Include="SpawnDev.WebFS" Version="1.3.0" />
+		<!-- Provides the backend for the WebTorrent Virtual File System Provider -->
+		<PackageReference Include="SpawnDev.BlazorJS.WebTorrents" Version="1.12.0" />
+		<!-- Provides access to Transformers.js and AI models, primarily used for monocular depth estimation with DepthAnythingV2 for autoamtic 2D to 3D covnersion -->
+		<PackageReference Include="SpawnDev.BlazorJS.TransformersJS" Version="1.20.0" />
+		<!-- Provides access to the Web Crypto API for cryptographic operations, used for secure key management, encryption/decryption, and other cryptographic functionalities in Rendusa -->
+		<PackageReference Include="SpawnDev.BlazorJS.Cryptography" Version="2.7.0" />
+		<!-- Provides access to PeerJS for WebRTC-based peer-to-peer communication, used for media streaming/sharing via WebRTC VFS backend and other real-time features in Rendusa -->
+		<PackageReference Include="SpawnDev.BlazorJS.PeerJS" Version="1.9.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ServiceWorker Include="wwwroot\service-worker.js" PublishedContent="wwwroot\service-worker.published.js" />
+	</ItemGroup>
+
+</Project>

@@ -1,0 +1,53 @@
+﻿@inject MediaLibraryService MediaLibrary
+
+<div class="nav-brand">
+    <span class="brand-icon">🎬</span>
+    <span class="brand-text">Rendusa</span>
+    <button class="btn-icon toggle-btn" @onclick="() => OnToggleSidebar.InvokeAsync()">☰</button>
+</div>
+
+<nav class="nav-menu">
+    <NavLink class="nav-item" href="" Match="NavLinkMatch.All">
+        <span class="nav-icon">▶</span>
+        <span class="nav-label">Player</span>
+    </NavLink>
+    <NavLink class="nav-item" href="library">
+        <span class="nav-icon">📁</span>
+        <span class="nav-label">Library</span>
+    </NavLink>
+    <NavLink class="nav-item" href="settings">
+        <span class="nav-icon">⚙</span>
+        <span class="nav-label">Settings</span>
+    </NavLink>
+</nav>
+
+<div class="nav-section-label">PLAYLIST</div>
+<div class="playlist-sidebar">
+    @if (MediaLibrary.Playlists.Count == 0)
+    {
+        <div class="playlist-empty">No playlists yet</div>
+    }
+    else
+    {
+        @foreach (var pl in MediaLibrary.Playlists)
+        {
+            <NavLink class="nav-item playlist-item" href="@($"player?playlist={pl.Id}")">
+                <span class="nav-icon">🎵</span>
+                <span class="nav-label truncate">@pl.Name</span>
+            </NavLink>
+        }
+    }
+</div>
+
+<div class="nav-footer">
+    <div class="nav-footer-text">SpawnDev.Rendusa</div>
+</div>
+
+@code {
+    [Parameter] public EventCallback OnToggleSidebar { get; set; }
+
+    protected override void OnInitialized()
+    {
+        MediaLibrary.OnChanged += () => InvokeAsync(StateHasChanged);
+    }
+}
