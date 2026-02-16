@@ -34,7 +34,7 @@ public class UIPopupMenu : UIElement
         Height = Items.Count * ItemH;
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         if (Items.Count == 0) return;
         float op = EffectiveOpacity;

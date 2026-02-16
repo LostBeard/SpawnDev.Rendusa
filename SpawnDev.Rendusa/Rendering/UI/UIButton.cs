@@ -11,7 +11,7 @@ public class UIButton : UIElement
     public bool Active { get; set; }
     public int FontSize { get; set; } = 18;
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         float op = EffectiveOpacity;
         float x = X * 2f - 1f;

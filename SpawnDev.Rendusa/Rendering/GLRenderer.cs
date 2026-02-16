@@ -13,7 +13,7 @@ namespace SpawnDev.Rendusa.Rendering;
 /// Future: ILGPU post-processing (depth estimation, stereo compositing)
 /// will feed processed textures into this renderer for 3D output.
 /// </summary>
-public class GLRenderer : IDisposable
+public class GLRenderer : IUIRenderer, IDisposable
 {
     // ── Static Renderer Registration ────────────────────────────
     private static readonly List<Type> _registeredTypes = new();
@@ -925,6 +925,8 @@ public class PlayerState
     public bool Shuffle { get; set; }
     public RepeatMode Repeat { get; set; } = RepeatMode.None;
     public bool ControlsVisible { get; set; } = true;
+    /// <summary>When true, controls stay visible and don't auto-hide.</summary>
+    public bool ControlsPinned { get; set; }
     public float ControlsOpacity { get; set; } = 1.0f;
     public MediaType MediaType { get; set; } = MediaType.Unknown;
     public bool HasPlaylist { get; set; }

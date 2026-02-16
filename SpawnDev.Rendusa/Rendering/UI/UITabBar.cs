@@ -18,7 +18,7 @@ public class UITabBar : UIElement
         Height = RowH;
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         if (Tabs.Count == 0) return;
         float op = EffectiveOpacity;

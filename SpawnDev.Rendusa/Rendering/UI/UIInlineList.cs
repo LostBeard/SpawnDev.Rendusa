@@ -20,7 +20,7 @@ public class UIInlineList : UIElement
         Height = Items.Count * ItemH;
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         float op = EffectiveOpacity;
         string? selected = GetSelectedValue?.Invoke();

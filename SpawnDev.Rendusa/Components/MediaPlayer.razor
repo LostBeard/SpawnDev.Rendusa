@@ -11,7 +11,7 @@
 @using SpawnDev.Rendusa.Rendering.OutputRenderers
 @using SpawnDev.Rendusa.Rendering
 
-@* ── Single WebGL canvas + hidden decoders ─────────────────────── *@
+@* ── Single WebGPU canvas + hidden decoders ─────────────────────── *@
 <div class="player-container" @ref="_containerRef" tabindex="0"
      @onkeydown="OnKeyDown" @onkeydown:preventDefault>
 
@@ -38,8 +38,8 @@
     private ElementReference _audioRef;
 
     // ── Rendering ─────────────────────────────────────────────────
-    private GLRenderer? _renderer;
-    private GLPlayerUI? _ui;
+    private WGPURenderer? _renderer;
+    private WGPUPlayerUI? _ui;
     private bool _glInitialized;
 
     // ── Media Elements (BlazorJS wrappers) ─────────────────────────
@@ -88,7 +88,7 @@
     private StereoLayout _detectedInputFormat = StereoLayout.Mono2D;
     private StereoLayout? _userOverrideFormat = null;
     private string? _detectedMosaicGrid = null;
-    private string _outputRenderer = OutputRendererBase.Flat2DId;
+    private string _outputRenderer = WGPUOutputRendererBase.Flat2DId;
     private Auto3DMode _auto3dMode = Auto3DMode.AsNeeded;
 
     private StereoLayout EffectiveInputFormat => _userOverrideFormat ?? _detectedInputFormat;
@@ -110,15 +110,15 @@
             _videoEl = new HTMLVideoElement(_videoRef);
             _audioEl = new HTMLAudioElement(_audioRef);
 
-            // Initialize WebGL2 renderer (do NOT use 'using' — GLRenderer stores the Window ref
-            // for the RAF render loop and disposes it in its own Dispose method)
+            // Initialize WebGPU renderer (do NOT use 'using' — WGPURenderer stores the Window ref
+            // for the RAF render loop and disposes it in its own DisposeAsync method)
             var window = JS.Get<Window>("window");
-            _renderer = new GLRenderer(window);
-            _renderer.Initialize(_canvasRef);
+            _renderer = new WGPURenderer(window);
+            await _renderer.InitializeAsync(_canvasRef);
             _renderer.OnFrame += OnRenderFrame;
 
             // Initialize UI
-            _ui = new GLPlayerUI(_renderer);
+            _ui = new WGPUPlayerUI(_renderer);
 
             // Restore persisted settings
             _auto3dMode = SettingsService.Settings.Auto3DMode;
@@ -501,12 +501,12 @@
             _renderer.UploadImageTexture(_loadingImage);
 
             // One-shot depth estimation for images
-            bool needsDepth = _outputRenderer != OutputRendererBase.Flat2DId
+            bool needsDepth = _outputRenderer != WGPUOutputRendererBase.Flat2DId
                 || (_renderer.RequiresDepthMap(_outputRenderer))
                 || _auto3dMode != Auto3DMode.Off;
             if (needsDepth)
             {
-                _ = RunImageDepthEstimation(_loadingImage);
+                await RunImageDepthEstimation(_loadingImage);
             }
 
             PushStateToRenderer();
@@ -955,7 +955,7 @@
     private void RestartDepthLoopIfNeeded()
     {
         // Depth is needed for any non-2D output mode
-        bool need3D = _outputRenderer != OutputRendererBase.Flat2DId;
+        bool need3D = _outputRenderer != WGPUOutputRendererBase.Flat2DId;
         // Depth renderers always need depth (it's the whole point of these modes)
         bool isDepthMode = _renderer?.RequiresDepthMap(_outputRenderer) ?? false;
         bool shouldRun = (isDepthMode || _auto3dMode != Auto3DMode.Off) && need3D && _isPlaying
@@ -1125,7 +1125,7 @@
         _hideControlsTimer = new System.Threading.Timer(
             _ => InvokeAsync(() =>
             {
-                if (_isPlaying)
+                if (_isPlaying && !(_renderer?.State.ControlsPinned ?? false))
                 {
                     _controlsVisible = false;
                     PushStateToRenderer();
@@ -1142,6 +1142,29 @@
     {
         var uri = new Uri(NavManager.Uri);
         var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+
+        // ?test=depth → load built-in depth test images
+        var test = query["test"];
+        if (string.Equals(test, "depth", StringComparison.OrdinalIgnoreCase))
+        {
+            var testImages = new[]
+            {
+                "test-images/mountain-landscape.jpg",
+                "test-images/snowy-mountains.jpg",
+                "test-images/forest-valley.jpg",
+                "test-images/city-street.jpg",
+                "test-images/portrait-face.jpg",
+            };
+            _playlist.Clear();
+            foreach (var img in testImages)
+            {
+                _playlist.Add(new PlaylistItem { Url = img, Title = Path.GetFileNameWithoutExtension(img) });
+            }
+            _playlistIndex = 0;
+            await LoadCurrentItem();
+            return;
+        }
+
         var src = query["src"];
         if (!string.IsNullOrEmpty(src))
         {
@@ -1246,7 +1269,7 @@
         _depthCtx?.Dispose();
         _depthCanvas?.Dispose();
 
-        _renderer?.Dispose();
+        if (_renderer != null) await _renderer.DisposeAsync();
         _audioContext?.Dispose();
     }
 

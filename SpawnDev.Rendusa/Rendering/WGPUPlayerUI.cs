@@ -6,8 +6,8 @@ using SpawnDev.Rendusa.Services;
 namespace SpawnDev.Rendusa.Rendering;
 
 /// <summary>
-/// WebGL-rendered player controls — layout, rendering, and hit-testing.
-/// All rendering goes through GLRenderer's DrawSolidQuad / DrawGradientQuad /
+/// WebGPU-rendered player controls — layout, rendering, and hit-testing.
+/// All rendering goes through WGPURenderer's DrawSolidQuad / DrawGradientQuad /
 /// DrawRoundedRect / DrawText. No HTML overlays; the entire control bar and
 /// title overlay are drawn in the WebGL scene.
 /// 
@@ -21,9 +21,9 @@ namespace SpawnDev.Rendusa.Rendering;
 ///   │ ▶  ⏮ ⏭  0:00/3:45   🔊 ▬vol▬  🔁 🔀  ⬜ │
 ///   └─────────────────────────────────────────────┘
 /// </summary>
-public class GLPlayerUI
+public class WGPUPlayerUI
 {
-    private readonly GLRenderer _renderer;
+    private readonly WGPURenderer _renderer;
 
     // ── Layout constants (normalized 0..1 space) ──────────────────
     private const float BarHeight = 0.065f;        // button row height
@@ -44,7 +44,7 @@ public class GLPlayerUI
     private float _fadeTarget = 1.0f;
     private const float FadeSpeed = 5.0f;
 
-    /// <summary>When true, a GL-drawn cursor is rendered at the mouse position.</summary>
+    /// <summary>When true, a WGPU-drawn cursor is rendered at the mouse position.</summary>
     public bool StereoMode { get; set; }
 
     // Hover/active state
@@ -88,14 +88,14 @@ public class GLPlayerUI
     private float _volumeBarRight;
     private float _volumeBarCenterY;
 
-    public GLPlayerUI(GLRenderer renderer)
+    public WGPUPlayerUI(WGPURenderer renderer)
     {
         _renderer = renderer;
     }
 
     // ── Layout & Rendering ────────────────────────────────────────
 
-    /// <summary>Render the control bar overlay. Called from GLRenderer's OnFrame event.</summary>
+    /// <summary>Render the control bar overlay. Called from WGPURenderer's OnFrame event.</summary>
     public void Render(float dt)
     {
         var state = _renderer.State;
@@ -159,13 +159,13 @@ public class GLPlayerUI
         if (_hudVisible)
             DrawPerformanceHud(state, _opacity);
 
-        // ── GL-drawn cursor (for stereo modes where real cursor is hidden) ──
+        // ── WGPU-drawn cursor (for stereo modes where real cursor is hidden) ──
         if (StereoMode)
-            DrawGLCursor();
+            DrawWGPUCursor();
     }
 
     /// <summary>Draw a small cursor indicator at the current mouse position.</summary>
-    private void DrawGLCursor()
+    private void DrawWGPUCursor()
     {
         // Convert normalized (0..1, top-left origin) to clip-space (-1..1)
         float cx = _mouseX * 2f - 1f;
@@ -226,7 +226,7 @@ public class GLPlayerUI
         // Output Format (3D toggle) — cycles through registered renderers
         rx -= ButtonSize + Padding * 0.5f;
         var fmtIcon = _renderer.ActiveRenderer?.DisplayName ?? "2D";
-        _buttons.Add(new UIButton { Id = "outputformat", Icon = fmtIcon, X = rx, Y = y, Width = ButtonSize, Height = ButtonSize, Active = state.OutputRenderer != OutputRendererBase.Flat2DId, Opacity = _opacity });
+        _buttons.Add(new UIButton { Id = "outputformat", Icon = fmtIcon, X = rx, Y = y, Width = ButtonSize, Height = ButtonSize, Active = state.OutputRenderer != WGPUOutputRendererBase.Flat2DId, Opacity = _opacity });
         _outputFormatBtnX = rx;
 
         // Input Format — shows detected or overridden stereo layout
@@ -1100,5 +1100,3 @@ public class GLPlayerUI
     }
 }
 
-/// <summary>A user action from the GL-rendered controls.</summary>
-public record PlayerAction(string Type, float Value = 0f);

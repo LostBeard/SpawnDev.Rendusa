@@ -17,7 +17,7 @@ public class UILabel : UIElement
         Height = RowH;
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         float op = EffectiveOpacity;
         float lx = X * 2f - 1f;

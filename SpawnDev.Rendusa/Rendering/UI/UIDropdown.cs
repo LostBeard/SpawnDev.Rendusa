@@ -18,7 +18,7 @@ public class UIDropdown : UIElement
         Height = RowH;
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         float op = EffectiveOpacity;
         string displayText = GetDisplayText?.Invoke() ?? "—";

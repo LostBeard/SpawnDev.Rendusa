@@ -1,7 +1,7 @@
 namespace SpawnDev.Rendusa.Rendering.UI;
 
 /// <summary>
-/// Base class for all WebGL-rendered UI elements.
+/// Base class for all GL/WebGPU-rendered UI elements.
 /// Each element manages its own layout, drawing, and hit-testing.
 /// </summary>
 public abstract class UIElement
@@ -61,9 +61,9 @@ public abstract class UIElement
     }
 
     /// <summary>
-    /// Draw this element and its children using GLRenderer primitives.
+    /// Draw this element and its children using renderer draw primitives.
     /// </summary>
-    public virtual void Draw(GLRenderer renderer)
+    public virtual void Draw(IUIRenderer renderer)
     {
         if (!Visible) return;
         DrawSelf(renderer);
@@ -78,7 +78,7 @@ public abstract class UIElement
     /// <summary>
     /// Draw just this element (not children). Override in subclasses.
     /// </summary>
-    protected virtual void DrawSelf(GLRenderer renderer) { }
+    protected virtual void DrawSelf(IUIRenderer renderer) { }
 
     /// <summary>
     /// Find the deepest visible element at normalized coordinates.

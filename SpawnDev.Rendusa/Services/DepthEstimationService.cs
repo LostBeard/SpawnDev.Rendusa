@@ -84,6 +84,11 @@ public class DepthEstimationService : IAsyncDisposable
     /// </summary>
     public float EdgeThreshold { get; set; } = 0.1f;
 
+    // TODO: Motion-adaptive temporal smoothing (per-pixel alpha from grayscale frame diff)
+    // was prototyped but removed due to canvas context invalidation after RawImage.FromCanvas().
+    // Re-implement when migrating to full WebGPU pipeline (depth tensor stays on GPU,
+    // no canvas round-trip needed for grayscale extraction).
+
     /// <summary>When true, DepthScale is auto-adjusted to maintain target FPS.</summary>
     public bool AutoDepthQuality { get; set; } = true;
 
@@ -303,7 +308,6 @@ public class DepthEstimationService : IAsyncDisposable
         // Reduction buffer: one min/max pair per workgroup (generous overallocation)
         int reductionSize = (len + 255) / 256 * 2; // 2 floats (min, max) per group
         _reductionBuffer = _gpuAccelerator.Allocate1D<float>(reductionSize);
-        // No _outputBuffer needed — _smoothedBuffer IS the output
 
         _bufW = w;
         _bufH = h;
@@ -469,7 +473,7 @@ public class DepthEstimationService : IAsyncDisposable
         float alpha = (_firstFrame || !TemporalSmoothingEnabled) ? 1f : Math.Min(Math.Max(TemporalSmoothing, 0f), 1f);
         float edgeThresh = Math.Min(Math.Max(EdgeThreshold, 0f), 1f);
 
-        // ── Step 3: Normalize + EMA smooth (GPU kernel) — output 0.0–1.0 ─
+        // ── Step 3: Normalize + bilateral smooth (GPU kernel) — output 0.0–1.0 ─
         _normalizeKernel!(len,
             _inputBuffer!.View, _smoothedBuffer!.View,
             globalMin, invRange, alpha, edgeThresh, _firstFrame ? 1 : 0);
@@ -537,6 +541,8 @@ public class DepthEstimationService : IAsyncDisposable
             dest.View.CopyFromCPU(floats);
         }
     }
+
+
 
     /// <summary>
     /// Read the smoothed buffer as a JS Float32Array.
@@ -613,7 +619,6 @@ public class DepthEstimationService : IAsyncDisposable
         // Normalize to [0.0, 1.0]
         float normalized = (input[index] - dMin) * invRange;
 
-        // Edge-aware EMA: snap to new value at depth discontinuities
         float blended;
         if (seedMode != 0)
         {
@@ -622,11 +627,16 @@ public class DepthEstimationService : IAsyncDisposable
         }
         else
         {
-            // Difference-clamped EMA: if the per-pixel depth change exceeds
-            // the edge threshold, snap α to 1.0 to kill ghosting instantly.
+            // Bilateral temporal filter: smooth quadratic falloff based on depth change.
+            // Unlike a hard threshold, this ramps alpha smoothly from the base value
+            // to 1.0 as the depth change approaches edgeThreshold, reducing ghosting
+            // at depth discontinuities while keeping smooth blending in stable areas.
             float diff = normalized - smoothed[index];
             float absDiff = diff > 0f ? diff : -diff;
-            float effectiveAlpha = absDiff > edgeThreshold ? 1f : alpha;
+            float t = edgeThreshold > 0f ? absDiff / edgeThreshold : 1f;
+            t = Math.Min(t, 1f);
+            float effectiveAlpha = alpha + (1f - alpha) * t * t;
+
             blended = effectiveAlpha * normalized + (1f - effectiveAlpha) * smoothed[index];
         }
 

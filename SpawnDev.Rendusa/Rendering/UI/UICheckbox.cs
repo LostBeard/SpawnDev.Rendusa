@@ -19,7 +19,7 @@ public class UICheckbox : UIElement
         Height = RowH;
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         float op = EffectiveOpacity;
         bool isChecked = GetValue?.Invoke() ?? false;

@@ -50,7 +50,7 @@ public class UIPanel : UIElement
         }
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         float op = EffectiveOpacity;
 

@@ -42,7 +42,7 @@ public class UISlider : UIElement
         return Math.Clamp((mx - left) / (right - left), 0f, 1f);
     }
 
-    protected override void DrawSelf(GLRenderer renderer)
+    protected override void DrawSelf(IUIRenderer renderer)
     {
         float op = EffectiveOpacity * (Dimmed ? 0.4f : 1f);
         float value = GetValue?.Invoke() ?? 0f;
