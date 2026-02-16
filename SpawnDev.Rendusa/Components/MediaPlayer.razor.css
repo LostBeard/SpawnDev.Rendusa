@@ -1,0 +1,30 @@
+/* ── MediaPlayer WebGL Canvas ─────────────────────────────── */
+
+.player-container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: #020210;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    outline: none;
+}
+
+.player-container.fullscreen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 9999;
+}
+
+.player-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    /* Canvas fills the entire player area. All content and controls
+       are rendered via WebGL — no HTML overlays. */
+}

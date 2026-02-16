@@ -1,5 +1,7 @@
 ﻿@page "/"
 @inject MediaLibraryService MediaLibrary
+@inject NowPlayingService NowPlaying
+@inject NavigationManager Navigation
 
 <PageTitle>Rendusa — Media Player</PageTitle>
 
@@ -71,8 +73,8 @@
 
     private void PlayItem(MediaItem item)
     {
-        // Navigate to player with this item
-        // Will be wired up when player supports URL-based item selection
+        NowPlaying.SetItems(new List<MediaItem> { item }, item.Id);
+        Navigation.NavigateTo("/player");
     }
 
     private string GetMediaIcon(MediaType type) => type switch

@@ -19,6 +19,7 @@ builder.Services.AddSingleton<SettingsService>();
 builder.Services.AddSingleton<FileImportService>();
 builder.Services.AddSingleton<NowPlayingService>();
 builder.Services.AddSingleton<VfsServiceWorkerBridge>();
+builder.Services.AddSingleton<DepthEstimationService>();
 
 // WebTorrent
 builder.Services.AddWebTorrentService();

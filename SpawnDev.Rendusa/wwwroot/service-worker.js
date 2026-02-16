@@ -22,6 +22,8 @@ self.addEventListener('fetch', (event) => {
         return; // Let the browser handle it normally
     }
 
+    const rangeHeader = event.request.headers.get('Range');
+    console.log(`[SW] Intercepting: ${event.request.method} ${url.pathname} Range: ${rangeHeader || 'none'}`);
     event.respondWith(handleVfsRequest(event));
 });
 
@@ -71,11 +73,13 @@ async function handleVfsRequest(event) {
         const meta = await waitForMessage(channel.port1, 'vfs-meta', 10000);
 
         if (meta.error) {
+            console.error(`[SW] VFS meta error: ${meta.error} status=${meta.status}`);
             return new Response(meta.error, { status: meta.status || 404 });
         }
 
         const totalSize = meta.totalSize;
         const contentType = meta.contentType || 'application/octet-stream';
+        console.log(`[SW] VFS meta: totalSize=${totalSize}, contentType=${contentType}, range=${meta.rangeStart}-${meta.rangeEnd}`);
 
         // Calculate actual range
         let actualStart = rangeStart;
@@ -143,13 +147,14 @@ async function handleVfsRequest(event) {
 
         if (isRangeRequest && totalSize > 0) {
             headers['Content-Range'] = `bytes ${actualStart}-${actualEnd}/${totalSize}`;
-
+            console.log(`[SW] Responding 206: Content-Range=${headers['Content-Range']}, Content-Length=${contentLength}, Content-Type=${contentType}`);
             return new Response(stream, {
                 status: 206,
                 statusText: 'Partial Content',
                 headers: headers
             });
         } else {
+            console.log(`[SW] Responding 200: Content-Length=${contentLength}, Content-Type=${contentType}`);
             return new Response(stream, {
                 status: 200,
                 statusText: 'OK',

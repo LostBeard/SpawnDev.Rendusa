@@ -4,7 +4,11 @@
     <aside class="sidebar @(SidebarCollapsed ? "collapsed" : "")">
         <NavMenu OnToggleSidebar="ToggleSidebar" />
     </aside>
-    <main class="main-content">
+    @if (SidebarCollapsed)
+    {
+        <button class="sidebar-toggle-floating" @onclick="ToggleSidebar">☰</button>
+    }
+    <main class="main-content @(SidebarCollapsed ? "sidebar-hidden" : "")">
         @Body
     </main>
 </div>

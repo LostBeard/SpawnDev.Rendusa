@@ -87,9 +87,7 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
             }
 
             // Listen for messages from the service worker
-            var onMessage = new ActionCallback<MessageEvent>(HandleServiceWorkerMessage);
-            _callbacks.Add(onMessage);
-            _swContainer.OnMessage += onMessage;
+            _swContainer.OnMessage += HandleServiceWorkerMessage;
 
             Console.WriteLine("[VfsBridge] Listening for VFS requests from service worker");
         }
@@ -131,6 +129,9 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
     {
         try
         {
+            // The service worker sends URL-encoded paths (e.g. %20 for spaces).
+            // VFS nodes store literal characters, so we must decode first.
+            path = Uri.UnescapeDataString(path);
             Console.WriteLine($"[VfsBridge] HandleVfsOpen: resolving '{path}'");
             var node = await _vfs.GetNodeAsync(path);
             Console.WriteLine($"[VfsBridge] GetNodeAsync returned: {(node == null ? "null" : node.GetType().Name + " " + node.Name)}");
@@ -170,7 +171,22 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
             var remaining = actualEnd - actualStart + 1;
             var cancelled = false;
 
-            var onPullMessage = new ActionCallback<MessageEvent>(async (pullEvent) =>
+            // Declare outside so cleanup can reference it
+            ActionCallback<MessageEvent>? onPullMessage = null;
+
+            // Cleanup helper — remove callback from group and unsubscribe from port
+            void Cleanup()
+            {
+                if (onPullMessage != null)
+                {
+                    port.OnMessage -= onPullMessage;
+                    _callbacks.Callbacks.Remove(onPullMessage);
+                    onPullMessage.Dispose();
+                    onPullMessage = null;
+                }
+            }
+
+            onPullMessage = new ActionCallback<MessageEvent>(async (pullEvent) =>
             {
                 try
                 {
@@ -180,6 +196,7 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
                     if (pullData.Type == "vfs-cancel")
                     {
                         cancelled = true;
+                        Cleanup();
                         port.Dispose();
                         return;
                     }
@@ -195,6 +212,7 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
                     if (chunkSize <= 0)
                     {
                         port.PostMessage(new { type = "vfs-data", done = true });
+                        Cleanup();
                         port.Dispose();
                         return;
                     }
@@ -217,6 +235,7 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
 
                     if (done)
                     {
+                        Cleanup();
                         port.Dispose();
                     }
                 }
@@ -225,6 +244,7 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
                     Console.WriteLine($"[VfsBridge] Pull error: {ex.Message}");
                     try
                     {
+                        Cleanup();
                         port.PostMessage(new { type = "vfs-error", error = ex.Message });
                         port.Dispose();
                     }
@@ -250,8 +270,12 @@ public class VfsServiceWorkerBridge : IAsyncBackgroundService, IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         _callbacks.Dispose();
-        _swContainer?.Dispose();
-        _swContainer = null;
+        if(_swContainer != null)
+        {
+            _swContainer.OnMessage -= HandleServiceWorkerMessage;
+            _swContainer.Dispose();
+            _swContainer = null;
+        }
         return ValueTask.CompletedTask;
     }
 }

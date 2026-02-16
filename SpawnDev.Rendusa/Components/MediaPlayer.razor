@@ -1,552 +1,720 @@
-@inject SettingsService SettingsService
-@implements IDisposable
+@* This is a component, not a page — it's hosted by Pages/Player.razor *@
+@implements IAsyncDisposable
+@inject BlazorJSRuntime JS
+@inject NavigationManager NavManager
+@inject SpawnDev.Rendusa.Services.SettingsService SettingsService
+@inject SpawnDev.Rendusa.Services.DepthEstimationService DepthService
+@using SpawnDev.BlazorJS
+@using SpawnDev.BlazorJS.JSObjects
+@using SpawnDev.BlazorJS.TransformersJS
+@using SpawnDev.Rendusa.Models
+@using SpawnDev.Rendusa.Rendering.OutputRenderers
+@using SpawnDev.Rendusa.Rendering
 
-<div class="player-container @(IsFullscreen ? "fullscreen" : "")"
-     id="rendusa-player"
-     @ref="PlayerContainer"
-     @onmousemove="OnMouseMove"
-     @onclick="OnPlayerClick"
-     @onmouseleave="OnMouseLeave"
-     tabindex="0"
-     @onkeydown="OnKeyDown"
-     @onkeydown:preventDefault="true">
+@* ── Single WebGL canvas + hidden decoders ─────────────────────── *@
+<div class="player-container" @ref="_containerRef" tabindex="0"
+     @onkeydown="OnKeyDown" @onkeydown:preventDefault>
 
-    @* === Media Viewport === *@
-    <div class="player-viewport">
-        @if (CurrentItem == null)
-        {
-            <div class="no-media">
-                <div class="no-media-icon">🎬</div>
-                <div>No media loaded</div>
-                <div class="text-muted" style="font-size: 0.8rem; margin-top: 0.3rem;">
-                    Add files to your library or drag and drop here
-                </div>
-            </div>
-        }
-        else if (CurrentItem.Type == MediaType.Video)
-        {
-            <video @ref="VideoElement"
-                   src="@CurrentItem.SourceUri">
-            </video>
-        }
-        else if (CurrentItem.Type == MediaType.Audio)
-        {
-            <div class="audio-visualization">
-                <div class="audio-icon">🎵</div>
-                <div class="audio-title">@CurrentItem.Title</div>
-                @if (!string.IsNullOrEmpty(CurrentItem.Artist))
-                {
-                    <div class="audio-artist text-secondary">@CurrentItem.Artist</div>
-                }
-            </div>
-            <audio @ref="AudioElement"
-                   src="@CurrentItem.SourceUri"
-                   style="display:none;">
-            </audio>
-        }
-        else if (CurrentItem.Type == MediaType.Image)
-        {
-            <img src="@CurrentItem.SourceUri" alt="@CurrentItem.Title" />
-        }
-    </div>
+    <canvas class="player-canvas" @ref="_canvasRef"
+            style="@(_renderer != null && _renderer.IsStereo(_outputRenderer) ? "cursor:none" : "")"
+            @onmousemove="OnCanvasMouseMove"
+            @onmousedown="OnCanvasMouseDown"
+            @onmouseup="OnCanvasMouseUp"
+            @onmouseleave="OnCanvasMouseLeave"
+            @ondblclick="OnCanvasDblClick"></canvas>
 
-    @* === Controls Overlay — rendered INSIDE the player container so they
-         appear on top of content in all modes including fullscreen 3D === *@
-    <div class="player-controls-overlay @(ControlsVisible ? "visible" : "hidden")">
-        @if (CurrentItem != null)
-        {
-            <div class="controls-gradient">
-                @* Seek bar — always show for video/audio; for images show nothing *@
-                @if (CurrentItem.Type != MediaType.Image)
-                {
-                    <input type="range" class="seek-bar w-full"
-                           min="0" max="@Duration" step="0.1" value="@CurrentTime"
-                           @onchange="OnSeek"
-                           @onclick:stopPropagation="true" />
-                }
+    @* Hidden video decoder — only used for frame capture via TexImage2D *@
+    <video @ref="_videoRef" style="display:none" playsinline crossorigin="anonymous"></video>
 
-                <div class="player-controls-row">
-                    @* Left: transport + time *@
-                    <div class="controls-left">
-                        <button class="btn-icon" @onclick="PreviousTrack" @onclick:stopPropagation="true" title="Previous">⏮</button>
-                        <button class="btn-icon btn-play" @onclick="TogglePlay" @onclick:stopPropagation="true"
-                                title="@(IsPlaying ? "Pause" : "Play")">
-                            @(IsPlaying ? "⏸" : "▶")
-                        </button>
-                        <button class="btn-icon" @onclick="NextTrack" @onclick:stopPropagation="true" title="Next">⏭</button>
-                        @if (CurrentItem.Type != MediaType.Image)
-                        {
-                            <span class="time-display">@FormatTime(CurrentTime) / @FormatTime(Duration)</span>
-                        }
-                        else
-                        {
-                            <span class="time-display">Image @(CurrentIndex + 1) / @Items.Count</span>
-                        }
-                    </div>
-
-                    @* Center: now playing *@
-                    <div class="controls-center">
-                        <span class="now-playing-info truncate">@CurrentItem.Title</span>
-                    </div>
-
-                    @* Right: shuffle, repeat, volume, fullscreen *@
-                    <div class="controls-right">
-                        <button class="btn-icon @(Shuffle ? "active" : "")" @onclick="ToggleShuffle"
-                                @onclick:stopPropagation="true" title="Shuffle">🔀</button>
-                        <button class="btn-icon @(Repeat != RepeatMode.None ? "active" : "")" @onclick="CycleRepeat"
-                                @onclick:stopPropagation="true" title="@GetRepeatTitle()">
-                            @GetRepeatIcon()
-                        </button>
-                        <span class="volume-group" @onclick:stopPropagation="true">
-                            <button class="btn-icon" @onclick="ToggleMute" title="@(IsMuted ? "Unmute" : "Mute")">
-                                @(IsMuted ? "🔇" : Volume > 0.5 ? "🔊" : "🔉")
-                            </button>
-                            <input type="range" class="volume-slider" min="0" max="1" step="0.05"
-                                   value="@(IsMuted ? 0 : Volume)" @onchange="OnVolumeChange" />
-                        </span>
-                        <button class="btn-icon" @onclick="ToggleFullscreen" @onclick:stopPropagation="true"
-                                title="@(IsFullscreen ? "Exit Fullscreen" : "Fullscreen")">
-                            @(IsFullscreen ? "⛶" : "⛶")
-                        </button>
-                    </div>
-                </div>
-            </div>
-        }
-        else
-        {
-            @* Even with no media, show a minimal bar so fullscreen is always accessible *@
-            <div class="controls-gradient controls-minimal">
-                <div class="player-controls-row">
-                    <div class="controls-left">
-                        <span class="text-muted" style="font-size: 0.8rem;">No media loaded</span>
-                    </div>
-                    <div class="controls-right">
-                        <button class="btn-icon" @onclick="ToggleFullscreen" @onclick:stopPropagation="true" title="Fullscreen">⛶</button>
-                    </div>
-                </div>
-            </div>
-        }
-    </div>
+    @* Hidden audio decoder — only used for audio playback + FFT analysis *@
+    <audio @ref="_audioRef" style="display:none" crossorigin="anonymous"></audio>
 </div>
 
 @code {
-    [Parameter] public List<MediaItem> Items { get; set; } = new();
+    // ── Element References ────────────────────────────────────────
+    private ElementReference _containerRef;
+    private ElementReference _canvasRef;
+    private ElementReference _videoRef;
+    private ElementReference _audioRef;
+
+    // ── Rendering ─────────────────────────────────────────────────
+    private GLRenderer? _renderer;
+    private GLPlayerUI? _ui;
+    private bool _glInitialized;
+
+    // ── Media Elements (BlazorJS wrappers) ─────────────────────────
+    private HTMLVideoElement? _videoEl;
+    private HTMLAudioElement? _audioEl;
+
+    // ── Audio Analysis ────────────────────────────────────────────
+    private AudioContext? _audioContext;
+
+    // ── Depth Estimation ──────────────────────────────────────────
+    private CancellationTokenSource? _depthCts;
+    private bool _depthLoopRunning;
+    private OffscreenCanvas? _depthCanvas;
+    private CanvasRenderingContext2D? _depthCtx;
+
+    // ── Image loading ─────────────────────────────────────────────
+    private HTMLImageElement? _loadingImage;
+
+    // ── Parameters (set by host page, e.g. Player.razor) ──────────
+    [Parameter] public List<MediaItem>? Items { get; set; }
     [Parameter] public string? StartItemId { get; set; }
 
-    private ElementReference PlayerContainer;
-    private ElementReference VideoElement;
-    private ElementReference AudioElement;
+    // ── Playlist / State ──────────────────────────────────────────
+    private List<PlaylistItem> _playlist = new();
+    private int _playlistIndex = -1;
+    private bool _shuffle;
+    private RepeatMode _repeat = RepeatMode.None;
+    private float _volume = 0.8f;
+    private bool _isMuted;
+    private bool _isPlaying;
+    private bool _isFullscreen;
 
-    private MediaItem? CurrentItem;
-    private int CurrentIndex = 0;
-    private bool IsPlaying = false;
-    private double CurrentTime = 0;
-    private double Duration = 0;
-    private double Volume = 0.8;
-    private bool IsMuted = false;
-    private bool Shuffle = false;
-    private RepeatMode Repeat = RepeatMode.None;
-    private bool IsFullscreen = false;
-    private bool ControlsVisible = true;
-    private DateTime _lastMouseMove = DateTime.UtcNow;
-    private System.Threading.Timer? _hideTimer;
-    private System.Threading.Timer? _slideshowTimer;
+    // ── Timers ────────────────────────────────────────────────────
     private System.Threading.Timer? _timeUpdateTimer;
-    private bool _mediaReady = false;
-    private string? _startItemHandled;
+    private System.Threading.Timer? _slideshowTimer;
+    private double _slideshowDuration = 5.0; // seconds per image
+    private double _slideshowElapsed;         // elapsed seconds in current image
+    private DateTime _slideshowStarted;       // when the current image started
+    private bool _slideshowPaused;            // true when user paused during image
 
-    protected override async Task OnInitializedAsync()
-    {
-        Volume = SettingsService.Settings.DefaultVolume;
+    // ── Controls visibility ───────────────────────────────────────
+    private System.Threading.Timer? _hideControlsTimer;
+    private bool _controlsVisible = true;
 
-        // Auto-hide timer: check every 500ms if controls should hide
-        _hideTimer = new System.Threading.Timer(CheckHideControls, null, 500, 500);
-    }
+    // ── 3D Format Auto-Detection ──────────────────────────────────
+    private StereoLayout _detectedInputFormat = StereoLayout.Mono2D;
+    private StereoLayout? _userOverrideFormat = null;
+    private string? _detectedMosaicGrid = null;
+    private string _outputRenderer = OutputRendererBase.Flat2DId;
+    private Auto3DMode _auto3dMode = Auto3DMode.AsNeeded;
 
-    protected override void OnParametersSet()
-    {
-        // If a specific item was requested (e.g. from Library click), play it
-        if (!string.IsNullOrEmpty(StartItemId) && _startItemHandled != StartItemId)
-        {
-            _startItemHandled = StartItemId;
-            var item = Items.FirstOrDefault(i => i.Id == StartItemId);
-            if (item != null)
-            {
-                PlayItem(item);
-                return;
-            }
-        }
+    private StereoLayout EffectiveInputFormat => _userOverrideFormat ?? _detectedInputFormat;
+    /// <summary>Key used to persist per-source overrides (filename without extension).</summary>
+    private string? _currentSourceKey = null;
 
-        if (CurrentItem == null && Items.Count > 0)
-        {
-            CurrentIndex = 0;
-            CurrentItem = Items[CurrentIndex];
-        }
-    }
+    // ══════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ══════════════════════════════════════════════════════════════
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        // Set up the JS media element whenever we have a current item but haven't set it up yet
-        if (CurrentItem != null && !_mediaReady)
-        {
-            await SetupMediaElementAsync();
-        }
-    }
-
-    /// <summary>
-    /// Obtain the active HTMLMediaElement (video or audio) from its @ref.
-    /// Uses the explicit cast from ElementReference to HTMLMediaElement via BlazorJS.
-    /// </summary>
-    private SpawnDev.BlazorJS.JSObjects.HTMLMediaElement? GetMediaElement()
-    {
-        if (CurrentItem == null) return null;
-        if (CurrentItem.Type == MediaType.Video)
-        {
-            return (SpawnDev.BlazorJS.JSObjects.HTMLMediaElement?)VideoElement;
-        }
-        else if (CurrentItem.Type == MediaType.Audio)
-        {
-            return (SpawnDev.BlazorJS.JSObjects.HTMLMediaElement?)AudioElement;
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// Wire up the JS media element after render: set volume, muted, and start polling time.
-    /// </summary>
-    private async Task SetupMediaElementAsync()
-    {
-        using var media = GetMediaElement();
-        if (media == null)
-        {
-            // Image mode — start slideshow timer if configured
-            if (CurrentItem?.Type == MediaType.Image)
-            {
-                StartSlideshowTimer();
-            }
-            _mediaReady = true;
-            return;
-        }
+        if (!firstRender || _glInitialized) return;
+        _glInitialized = true;
 
         try
         {
-            media.Volume = Volume;
-            media.Muted = IsMuted;
+            // Create media element wrappers via BlazorJS
+            _videoEl = new HTMLVideoElement(_videoRef);
+            _audioEl = new HTMLAudioElement(_audioRef);
 
-            // Auto-play if IsPlaying was set (e.g. from PlayItem)
-            if (IsPlaying)
-            {
-                try { await media.Play(); }
-                catch { IsPlaying = false; } // Autoplay may be blocked
-            }
+            // Initialize WebGL2 renderer (do NOT use 'using' — GLRenderer stores the Window ref
+            // for the RAF render loop and disposes it in its own Dispose method)
+            var window = JS.Get<Window>("window");
+            _renderer = new GLRenderer(window);
+            _renderer.Initialize(_canvasRef);
+            _renderer.OnFrame += OnRenderFrame;
 
-            // Poll time updates from JS every 250ms
-            _timeUpdateTimer?.Dispose();
-            _timeUpdateTimer = new System.Threading.Timer(async _ =>
+            // Initialize UI
+            _ui = new GLPlayerUI(_renderer);
+
+            // Restore persisted settings
+            _auto3dMode = SettingsService.Settings.Auto3DMode;
+            _outputRenderer = SettingsService.Settings.OutputRenderer;
+            _renderer.SetOutputRenderer(_outputRenderer);
+            _ui.StereoMode = _renderer.IsStereo(_outputRenderer);
+
+            // Restore depth estimation settings
+            DepthService.Model = SettingsService.Settings.DepthModel;
+            DepthService.DepthScale = SettingsService.Settings.DepthScale;
+            DepthService.NormalizeEnabled = SettingsService.Settings.DepthNormalize;
+            DepthService.TemporalSmoothing = SettingsService.Settings.DepthTemporalSmoothing;
+            DepthService.TemporalSmoothingEnabled = SettingsService.Settings.DepthTemporalSmoothingEnabled;
+            DepthService.EdgeThreshold = SettingsService.Settings.DepthEdgeThreshold;
+
+            // Attach media events using ActionEvent (+=/-= pattern)
+            _videoEl.OnEnded += OnMediaEnded;
+            _audioEl.OnEnded += OnMediaEnded;
+
+            // Start render loop
+            _renderer.StartRenderLoop();
+
+            // Start time update timer (polls current time from media elements)
+            _timeUpdateTimer = new System.Threading.Timer(
+                _ => InvokeAsync(UpdateTimeFromMedia), null, 0, 250);
+
+            // Check for initial playlist from query params
+            await LoadFromQueryParams();
+
+            // If no items loaded from query params, build playlist from [Parameter] Items
+            if (_playlist.Count == 0 && Items != null && Items.Count > 0)
             {
-                await InvokeAsync(() =>
+                _playlist = Items.Select(m => new PlaylistItem
                 {
-                    try
-                    {
-                        using var m = GetMediaElement();
-                        if (m == null) return;
-                        var dur = m.Duration;
-                        CurrentTime = m.CurrentTime;
-                        Duration = dur.HasValue && !double.IsNaN(dur.Value) && !double.IsInfinity(dur.Value) ? dur.Value : 0;
-                        if (m.Ended)
-                        {
-                            OnMediaEnded();
-                        }
-                        StateHasChanged();
-                    }
-                    catch { }
-                });
-            }, null, 250, 250);
+                    Url = m.SourceUri,
+                    Title = m.Title,
+                    MimeType = m.MimeType
+                }).ToList();
 
-            _mediaReady = true;
+                // Find start index from StartItemId, default to 0
+                _playlistIndex = 0;
+                if (!string.IsNullOrEmpty(StartItemId))
+                {
+                    var idx = Items.FindIndex(m => m.Id == StartItemId);
+                    if (idx >= 0) _playlistIndex = idx;
+                }
+
+                await LoadCurrentItem();
+            }
         }
-        catch { }
-    }
-
-    private void OnMouseMove()
-    {
-        _lastMouseMove = DateTime.UtcNow;
-        if (!ControlsVisible)
+        catch (Exception ex)
         {
-            ControlsVisible = true;
-            InvokeAsync(StateHasChanged);
+            Console.Error.WriteLine($"[MediaPlayer] Init failed: {ex.Message}");
         }
     }
 
-    private void OnMouseLeave()
+    // ══════════════════════════════════════════════════════════════
+    // Render Frame Callback
+    // ══════════════════════════════════════════════════════════════
+
+    private void OnRenderFrame(float dt)
     {
-        // Keep controls visible when not fullscreen
-        if (!IsFullscreen) return;
-        ControlsVisible = false;
+        // Render UI controls on top of the media content
+        _ui?.Render(dt);
     }
 
-    private async Task OnPlayerClick()
+    // ══════════════════════════════════════════════════════════════
+    // State Push — sync C# state to renderer
+    // ══════════════════════════════════════════════════════════════
+
+    private void PushStateToRenderer()
     {
-        // Click on viewport toggles play/pause (like VLC)
-        if (CurrentItem != null)
+        if (_renderer == null) return;
+        var state = _renderer.State;
+        state.IsPlaying = _isPlaying;
+        state.Volume = _volume;
+        state.IsMuted = _isMuted;
+        state.IsFullscreen = _isFullscreen;
+        state.Shuffle = _shuffle;
+        state.Repeat = _repeat;
+        state.ControlsVisible = _controlsVisible;
+        state.HasPlaylist = _playlist.Count > 1;
+        state.CanPrev = _playlistIndex > 0;
+        state.CanNext = _playlistIndex < _playlist.Count - 1;
+        state.InputFormat = EffectiveInputFormat;
+        state.DetectedInputFormat = _detectedInputFormat;
+        state.IsInputFormatOverridden = _userOverrideFormat != null;
+        state.MosaicGrid = _detectedMosaicGrid;
+        state.OutputRenderer = _outputRenderer;
+        state.Auto3DMode = _auto3dMode;
+
+        // Depth estimation settings (from AppSettings or service)
+        state.DepthModel = DepthService.Model;
+        state.DepthScale = DepthService.DepthScale;
+        state.DepthNormalize = DepthService.NormalizeEnabled;
+        state.DepthSmoothing = DepthService.TemporalSmoothing;
+        state.DepthTemporalSmoothing = DepthService.TemporalSmoothingEnabled;
+        state.DepthEdgeThreshold = DepthService.EdgeThreshold;
+        state.AutoDepthQuality = DepthService.AutoDepthQuality;
+        state.DepthQualityBias = DepthService.DepthQualityBias;
+
+        if (_playlistIndex >= 0 && _playlistIndex < _playlist.Count)
+            state.Title = _playlist[_playlistIndex].Title;
+
+        _renderer.Invalidate();
+    }
+
+    private void UpdateTimeFromMedia()
+    {
+        if (_renderer == null) return;
+        var state = _renderer.State;
+
+        try
         {
-            await TogglePlay();
+            if (state.MediaType == MediaType.Video && _videoEl != null)
+            {
+                state.CurrentTime = _videoEl.CurrentTime;
+                state.Duration = _videoEl.Duration ?? 0;
+            }
+            else if (state.MediaType == MediaType.Audio && _audioEl != null)
+            {
+                state.CurrentTime = _audioEl.CurrentTime;
+                state.Duration = _audioEl.Duration ?? 0;
+            }
+            else if (state.MediaType == MediaType.Image)
+            {
+                // Slideshow progress
+                if (!_slideshowPaused)
+                {
+                    _slideshowElapsed = (DateTime.UtcNow - _slideshowStarted).TotalSeconds;
+                }
+                state.CurrentTime = Math.Min(_slideshowElapsed, _slideshowDuration);
+                state.Duration = _playlist.Count > 1 ? _slideshowDuration : 0;
+            }
         }
+        catch
+        {
+            // Element may be disposed or not ready
+        }
+
+        _renderer.ClearTextCache(); // Time text changed — invalidate cache
+        _renderer.Invalidate();
     }
 
-    private void CheckHideControls(object? state)
+    // ══════════════════════════════════════════════════════════════
+    // Media Playback Control
+    // ══════════════════════════════════════════════════════════════
+
+    private async Task PlayPause()
     {
-        // Auto-hide controls after 3 seconds of inactivity in fullscreen
-        if (!IsFullscreen) return;
-        if ((DateTime.UtcNow - _lastMouseMove).TotalSeconds > 3 && ControlsVisible)
+        if (_isPlaying)
         {
-            ControlsVisible = false;
-            InvokeAsync(StateHasChanged);
+            _isPlaying = false;
+            _videoEl?.Pause();
+            _audioEl?.Pause();
+
+            // Pause slideshow for images
+            if (_renderer?.State.MediaType == MediaType.Image)
+            {
+                _slideshowPaused = true;
+                _slideshowElapsed = (DateTime.UtcNow - _slideshowStarted).TotalSeconds;
+                _slideshowTimer?.Dispose();
+                _slideshowTimer = null;
+            }
         }
+        else
+        {
+            _isPlaying = true;
+            if (_renderer?.State.MediaType == MediaType.Video && _videoEl != null)
+                await _videoEl.Play();
+            else if (_renderer?.State.MediaType == MediaType.Audio && _audioEl != null)
+                await _audioEl.Play();
+            else if (_renderer?.State.MediaType == MediaType.Image)
+            {
+                // Resume slideshow
+                _slideshowPaused = false;
+                _slideshowStarted = DateTime.UtcNow.AddSeconds(-_slideshowElapsed);
+                if (_playlist.Count > 1)
+                    StartSlideshowTimer();
+            }
+        }
+        PushStateToRenderer();
+        ScheduleHideControls();
+    }
+
+    private void Seek(double fraction)
+    {
+        var duration = _renderer?.State.Duration ?? 0;
+        if (duration <= 0) return;
+
+        var time = fraction * duration;
+        if (_renderer?.State.MediaType == MediaType.Video && _videoEl != null)
+            _videoEl.CurrentTime = time;
+        else if (_renderer?.State.MediaType == MediaType.Audio && _audioEl != null)
+            _audioEl.CurrentTime = time;
+
+        _renderer?.Invalidate();
+    }
+
+    private void SetVolume(float vol)
+    {
+        _volume = Math.Clamp(vol, 0f, 1f);
+        if (_videoEl != null) _videoEl.Volume = _volume;
+        if (_audioEl != null) _audioEl.Volume = _volume;
+        PushStateToRenderer();
+    }
+
+    private void ToggleMute()
+    {
+        _isMuted = !_isMuted;
+        if (_videoEl != null) _videoEl.Muted = _isMuted;
+        if (_audioEl != null) _audioEl.Muted = _isMuted;
+        PushStateToRenderer();
+    }
+
+    private void ToggleShuffle()
+    {
+        _shuffle = !_shuffle;
+        PushStateToRenderer();
+    }
+
+    private void CycleRepeat()
+    {
+        _repeat = _repeat switch
+        {
+            RepeatMode.None => RepeatMode.RepeatAll,
+            RepeatMode.RepeatAll => RepeatMode.RepeatOne,
+            _ => RepeatMode.None
+        };
+        PushStateToRenderer();
     }
 
     private async Task ToggleFullscreen()
     {
         try
         {
-            if (!IsFullscreen)
+            using var document = JS.Get<Document>("document");
+            if (_isFullscreen)
             {
-                using var el = (SpawnDev.BlazorJS.JSObjects.HTMLElement?)PlayerContainer;
-                if (el != null)
-                {
-                    await el.RequestFullscreen();
-                    IsFullscreen = true;
-                }
+                await document.ExitFullscreen();
+                _isFullscreen = false;
             }
             else
             {
-                using var window = new SpawnDev.BlazorJS.JSObjects.Window();
-                using var doc = window.Document;
-                await doc.ExitFullscreen();
-                IsFullscreen = false;
+                using var container = new HTMLElement(_containerRef);
+                await container.RequestFullscreen();
+                _isFullscreen = true;
             }
+        }
+        catch { /* Fullscreen may be denied */ }
+        PushStateToRenderer();
+    }
+
+    // ── Playlist Navigation ───────────────────────────────────────
+
+    private async Task PlayNext()
+    {
+        if (_playlist.Count == 0) return;
+
+        if (_shuffle)
+        {
+            var rng = new Random();
+            _playlistIndex = rng.Next(_playlist.Count);
+        }
+        else if (_playlistIndex < _playlist.Count - 1)
+        {
+            _playlistIndex++;
+        }
+        else if (_repeat == RepeatMode.RepeatAll)
+        {
+            _playlistIndex = 0;
+        }
+        else
+        {
+            return; // End of playlist
+        }
+
+        await LoadCurrentItem();
+    }
+
+    private async Task PlayPrev()
+    {
+        if (_playlist.Count == 0 || _playlistIndex <= 0) return;
+        _playlistIndex--;
+        await LoadCurrentItem();
+    }
+
+    private async Task LoadCurrentItem()
+    {
+        if (_playlistIndex < 0 || _playlistIndex >= _playlist.Count) return;
+
+        var item = _playlist[_playlistIndex];
+        _renderer?.ClearTextCache();
+        _renderer?.ClearDepth();
+        DepthService.ResetSmoothing();
+        StopDepthLoop();
+
+        // Auto-detect 3D format from filename
+        var sourceName = item.Title ?? item.Url;
+        _currentSourceKey = Path.GetFileNameWithoutExtension(sourceName);
+        (_detectedInputFormat, _detectedMosaicGrid) = DetectStereoLayout(sourceName);
+
+        // Check for a saved per-source override
+        _userOverrideFormat = null;
+        if (_currentSourceKey != null &&
+            SettingsService.Settings.InputFormatOverrides.TryGetValue(_currentSourceKey, out var savedOverride) &&
+            Enum.TryParse<StereoLayout>(savedOverride, out var parsedLayout))
+        {
+            _userOverrideFormat = parsedLayout;
+        }
+
+        // Determine media type from MIME or extension
+        var mediaType = DetectMediaType(item.Url, item.MimeType);
+
+        if (_renderer != null)
+            _renderer.State.MediaType = mediaType;
+
+        // Stop current playback
+        _videoEl?.Pause();
+        _audioEl?.Pause();
+
+        switch (mediaType)
+        {
+            case MediaType.Video:
+                await SetupVideoSource(item.Url);
+                break;
+            case MediaType.Audio:
+                await SetupAudioSource(item.Url);
+                break;
+            case MediaType.Image:
+                await SetupImageSource(item.Url);
+                break;
+        }
+
+        PushStateToRenderer();
+    }
+
+    private async Task SetupVideoSource(string url)
+    {
+        if (_videoEl == null || _renderer == null) return;
+
+        _videoEl.Src = url;
+        _videoEl.Volume = _volume;
+        _videoEl.Muted = _isMuted;
+        _renderer.VideoElement = _videoEl;
+
+        _isPlaying = true;
+        try { await _videoEl.Play(); } catch { /* autoplay may be blocked */ }
+        PushStateToRenderer();
+        RestartDepthLoopIfNeeded();
+    }
+
+    private async Task SetupAudioSource(string url)
+    {
+        if (_audioEl == null || _renderer == null) return;
+
+        _audioEl.Src = url;
+        _audioEl.Volume = _volume;
+        _audioEl.Muted = _isMuted;
+
+        // Setup audio analyser for FFT visualization
+        SetupAudioAnalyser();
+
+        _isPlaying = true;
+        try { await _audioEl.Play(); } catch { /* autoplay may be blocked */ }
+        PushStateToRenderer();
+    }
+
+    private async Task SetupImageSource(string url)
+    {
+        if (_renderer == null) return;
+
+        // Dispose any previous loading image
+        _loadingImage?.Dispose();
+        _loadingImage = null;
+
+        try
+        {
+            _loadingImage = await HTMLImageElement.CreateFromImageAsync(url, "anonymous");
+            _renderer.UploadImageTexture(_loadingImage);
+
+            // One-shot depth estimation for images
+            bool needsDepth = _outputRenderer != OutputRendererBase.Flat2DId
+                || (_renderer.RequiresDepthMap(_outputRenderer))
+                || _auto3dMode != Auto3DMode.Off;
+            if (needsDepth)
+            {
+                _ = RunImageDepthEstimation(_loadingImage);
+            }
+
+            PushStateToRenderer();
         }
         catch
         {
-            // Fullscreen may not be available in all contexts
-        }
-        ControlsVisible = true;
-    }
-
-    private async Task TogglePlay()
-    {
-        if (CurrentItem?.Type == MediaType.Image)
-        {
-            // For images, toggle slideshow
-            IsPlaying = !IsPlaying;
-            if (IsPlaying)
-                StartSlideshowTimer();
-            else
-                StopSlideshowTimer();
-            return;
+            // Image failed to load — stay on placeholder
         }
 
-        using var media = GetMediaElement();
-        if (media == null) return;
+        // Set up slideshow timer if there are multiple items
+        _slideshowElapsed = 0;
+        _slideshowStarted = DateTime.UtcNow;
+        _slideshowPaused = false;
+        _isPlaying = true; // Images auto-play through slideshow
 
-        if (IsPlaying)
+        if (_playlist.Count > 1)
         {
-            media.Pause();
-            IsPlaying = false;
+            StartSlideshowTimer();
         }
         else
         {
-            try
-            {
-                await media.Play();
-                IsPlaying = true;
-            }
-            catch
-            {
-                // Autoplay may be blocked
-            }
+            // Single image — set duration to 0 (no auto-advance)
+            _slideshowTimer?.Dispose();
+            _slideshowTimer = null;
         }
-    }
 
-    private void ToggleMute()
-    {
-        IsMuted = !IsMuted;
-        try
-        {
-            using var media = GetMediaElement();
-            if (media != null)
-            {
-                media.Muted = IsMuted;
-            }
-        }
-        catch { }
-    }
-
-    private void OnMediaEnded()
-    {
-        IsPlaying = false;
-        if (Repeat == RepeatMode.RepeatOne)
-        {
-            // Replay current
-            try
-            {
-                using var media = GetMediaElement();
-                if (media != null)
-                {
-                    media.CurrentTime = 0;
-                    _ = media.Play();
-                    IsPlaying = true;
-                }
-            }
-            catch { }
-        }
-        else if (SettingsService.Settings.AutoPlayNext || Repeat == RepeatMode.RepeatAll)
-        {
-            NextTrack();
-        }
-    }
-
-    private void NextTrack()
-    {
-        if (Items.Count == 0) return;
-        StopSlideshowTimer();
-        _timeUpdateTimer?.Dispose();
-        _mediaReady = false;
-
-        if (Shuffle)
-        {
-            CurrentIndex = Random.Shared.Next(Items.Count);
-        }
-        else
-        {
-            CurrentIndex = (CurrentIndex + 1) % Items.Count;
-        }
-        if (CurrentIndex == 0 && Repeat == RepeatMode.None && !Shuffle)
-        {
-            IsPlaying = false;
-            return;
-        }
-        CurrentItem = Items[CurrentIndex];
-        CurrentTime = 0;
-        Duration = 0;
-    }
-
-    private void PreviousTrack()
-    {
-        if (Items.Count == 0) return;
-        StopSlideshowTimer();
-        _timeUpdateTimer?.Dispose();
-        _mediaReady = false;
-
-        CurrentIndex = CurrentIndex > 0 ? CurrentIndex - 1 : Items.Count - 1;
-        CurrentItem = Items[CurrentIndex];
-        CurrentTime = 0;
-        Duration = 0;
+        PushStateToRenderer();
     }
 
     /// <summary>
-    /// Play a specific media item from the list.
+    /// Start or restart the slideshow timer for image auto-advance.
     /// </summary>
-    public void PlayItem(MediaItem item)
-    {
-        var idx = Items.IndexOf(item);
-        if (idx < 0)
-        {
-            Items.Add(item);
-            idx = Items.Count - 1;
-        }
-        StopSlideshowTimer();
-        _timeUpdateTimer?.Dispose();
-        _mediaReady = false;
-
-        CurrentIndex = idx;
-        CurrentItem = item;
-        CurrentTime = 0;
-        Duration = 0;
-        IsPlaying = true;
-        StateHasChanged();
-    }
-
-    private void OnSeek(ChangeEventArgs e)
-    {
-        if (double.TryParse(e.Value?.ToString(), out var val))
-        {
-            CurrentTime = val;
-            try
-            {
-                using var media = GetMediaElement();
-                if (media != null)
-                {
-                    media.CurrentTime = val;
-                }
-            }
-            catch { }
-        }
-    }
-
-    private void OnVolumeChange(ChangeEventArgs e)
-    {
-        if (double.TryParse(e.Value?.ToString(), out var val))
-        {
-            Volume = val;
-            IsMuted = val <= 0;
-            try
-            {
-                using var media = GetMediaElement();
-                if (media != null)
-                {
-                    media.Volume = val;
-                    media.Muted = IsMuted;
-                }
-            }
-            catch { }
-        }
-    }
-
-    private void ToggleShuffle() => Shuffle = !Shuffle;
-
-    private void CycleRepeat()
-    {
-        Repeat = Repeat switch
-        {
-            RepeatMode.None => RepeatMode.RepeatAll,
-            RepeatMode.RepeatAll => RepeatMode.RepeatOne,
-            _ => RepeatMode.None
-        };
-    }
-
-    // --- Image slideshow ---
-
     private void StartSlideshowTimer()
     {
-        StopSlideshowTimer();
-        var durationMs = (int)(SettingsService.Settings.ImagePlayDuration * 1000);
-        _slideshowTimer = new System.Threading.Timer(_ =>
-        {
-            InvokeAsync(() =>
-            {
-                NextTrack();
-                if (CurrentItem?.Type == MediaType.Image && IsPlaying)
-                {
-                    // Restart timer for next image
-                    StartSlideshowTimer();
-                }
-                else
-                {
-                    IsPlaying = false;
-                }
-                StateHasChanged();
-            });
-        }, null, durationMs, Timeout.Infinite);
-    }
-
-    private void StopSlideshowTimer()
-    {
         _slideshowTimer?.Dispose();
-        _slideshowTimer = null;
+        int remainingMs = (int)((_slideshowDuration - _slideshowElapsed) * 1000);
+        if (remainingMs <= 0) remainingMs = 1;
+        _slideshowTimer = new System.Threading.Timer(
+            async _ => await InvokeAsync(async () => await PlayNext()),
+            null, remainingMs, System.Threading.Timeout.Infinite);
     }
 
-    // --- Keyboard ---
+    /// <summary>
+    /// One-shot depth estimation for a still image.
+    /// </summary>
+    private async Task RunImageDepthEstimation(HTMLImageElement imageEl)
+    {
+        if (_renderer == null) return;
+
+        try
+        {
+            _renderer.State.DepthProcessing = true;
+            _renderer.Invalidate();
+
+            await DepthService.EnsurePipelineAsync();
+
+            int imgW = imageEl.NaturalWidth;
+            int imgH = imageEl.NaturalHeight;
+            if (imgW == 0 || imgH == 0) return;
+
+            var scale = DepthService.DepthScale;
+            int depthW = (int)(imgW * scale);
+            int depthH = (int)(imgH * scale);
+
+            using var canvas = new OffscreenCanvas(depthW, depthH);
+            using var ctx = canvas.Get2DContext();
+            ctx.DrawImage(imageEl, 0, 0, depthW, depthH);
+
+            var depthFrame = await DepthService.EstimateAsync(canvas, _renderer.State.PerfStats);
+            if (depthFrame != null)
+            {
+                _renderer.UploadDepthTexture(depthFrame.Width, depthFrame.Height, depthFrame.Data);
+                _renderer.State.DepthReady = true;
+                depthFrame.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DepthService] Image depth failed: {ex.Message}");
+        }
+        finally
+        {
+            _renderer.State.DepthProcessing = false;
+            _renderer.Invalidate();
+        }
+    }
+
+    private void SetupAudioAnalyser()
+    {
+        if (_audioEl == null || _renderer == null) return;
+
+        try
+        {
+            _audioContext ??= new AudioContext();
+            var source = _audioContext.CreateMediaElementSource(_audioEl);
+            var analyser = _audioContext.CreateAnalyser();
+            analyser.FftSize = 256;
+            source.Connect(analyser);
+            analyser.Connect(_audioContext.Destination);
+
+            _renderer.Analyser = analyser;
+            _renderer.FftData = new Uint8Array((int)analyser.FrequencyBinCount);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[MediaPlayer] Audio analyser setup failed: {ex.Message}");
+        }
+    }
+
+    // ── Media Event Handlers ──────────────────────────────────────
+
+    private void OnMediaEnded(Event e)
+    {
+        if (_repeat == RepeatMode.RepeatOne)
+        {
+            // Replay current item
+            if (_renderer?.State.MediaType == MediaType.Video && _videoEl != null)
+            {
+                _videoEl.CurrentTime = 0;
+                _ = _videoEl.Play();
+            }
+            else if (_renderer?.State.MediaType == MediaType.Audio && _audioEl != null)
+            {
+                _audioEl.CurrentTime = 0;
+                _ = _audioEl.Play();
+            }
+        }
+        else
+        {
+            _ = InvokeAsync(async () => await PlayNext());
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Input Handling (Blazor @on* events → GLPlayerUI hit-testing)
+    // ══════════════════════════════════════════════════════════════
+
+    private void OnCanvasMouseMove(MouseEventArgs e)
+    {
+        if (_ui == null || _renderer == null) return;
+
+        // Convert to normalized 0..1 coords
+        var canvasW = _renderer.CanvasWidth;
+        var canvasH = _renderer.CanvasHeight;
+        if (canvasW == 0 || canvasH == 0) return;
+
+        // Blazor gives OffsetX/OffsetY relative to the element
+        var normX = (float)(e.OffsetX / canvasW);
+        var normY = (float)(e.OffsetY / canvasH);
+
+        var cursor = _ui.OnMouseMove(normX, normY);
+
+        // Check for drag actions
+        var dragAction = _ui.OnDrag(normX, normY);
+        if (dragAction != null)
+            HandleUIAction(dragAction);
+
+        ShowControls();
+        _renderer.Invalidate();
+    }
+
+    private void OnCanvasMouseDown(MouseEventArgs e)
+    {
+        if (_ui == null || _renderer == null) return;
+        var canvasW = _renderer.CanvasWidth;
+        var canvasH = _renderer.CanvasHeight;
+        if (canvasW == 0 || canvasH == 0) return;
+
+        var normX = (float)(e.OffsetX / canvasW);
+        var normY = (float)(e.OffsetY / canvasH);
+
+        var consumed = _ui.OnMouseDown(normX, normY);
+        if (!consumed)
+        {
+            // Click on the media area — toggle play/pause
+            _ = InvokeAsync(PlayPause);
+        }
+        _renderer.Invalidate();
+    }
+
+    private void OnCanvasMouseUp(MouseEventArgs e)
+    {
+        if (_ui == null || _renderer == null) return;
+        var canvasW = _renderer.CanvasWidth;
+        var canvasH = _renderer.CanvasHeight;
+        if (canvasW == 0 || canvasH == 0) return;
+
+        var normX = (float)(e.OffsetX / canvasW);
+        var normY = (float)(e.OffsetY / canvasH);
+
+        var action = _ui.OnMouseUp(normX, normY);
+        if (action != null)
+            HandleUIAction(action);
+
+        _renderer.Invalidate();
+    }
+
+    private void OnCanvasMouseLeave(MouseEventArgs e)
+    {
+        _ui?.OnMouseLeave();
+        ScheduleHideControls();
+        _renderer?.Invalidate();
+    }
+
+    private async Task OnCanvasDblClick(MouseEventArgs e)
+    {
+        await ToggleFullscreen();
+    }
 
     private async Task OnKeyDown(KeyboardEventArgs e)
     {
@@ -554,56 +722,542 @@
         {
             case " ":
             case "k":
-                await TogglePlay();
+                await PlayPause();
                 break;
             case "f":
-            case "F11":
                 await ToggleFullscreen();
                 break;
             case "m":
                 ToggleMute();
                 break;
-            case "ArrowRight":
-                var newTimeR = Math.Min(Duration, CurrentTime + 5);
-                CurrentTime = newTimeR;
-                try { using var m = GetMediaElement(); if (m != null) m.CurrentTime = newTimeR; } catch { }
-                break;
             case "ArrowLeft":
-                var newTimeL = Math.Max(0, CurrentTime - 5);
-                CurrentTime = newTimeL;
-                try { using var m = GetMediaElement(); if (m != null) m.CurrentTime = newTimeL; } catch { }
+                Seek(Math.Max(0, (_renderer?.State.CurrentTime ?? 0) / (_renderer?.State.Duration ?? 1) - 0.05));
                 break;
-            case "Escape":
-                if (IsFullscreen) await ToggleFullscreen();
+            case "ArrowRight":
+                Seek(Math.Min(1, (_renderer?.State.CurrentTime ?? 0) / (_renderer?.State.Duration ?? 1) + 0.05));
+                break;
+            case "ArrowUp":
+                SetVolume(_volume + 0.05f);
+                break;
+            case "ArrowDown":
+                SetVolume(_volume - 0.05f);
+                break;
+            case "n":
+                await PlayNext();
+                break;
+            case "p":
+                await PlayPrev();
+                break;
+            case "3":
+                CycleOutputFormat();
+                break;
+            case "4":
+                _ = CycleInputFormat();
                 break;
         }
     }
 
-    private string GetRepeatTitle() => Repeat switch
-    {
-        RepeatMode.RepeatOne => "Repeat One",
-        RepeatMode.RepeatAll => "Repeat All",
-        _ => "Repeat Off"
-    };
+    // ── Handle UI Actions from GLPlayerUI ─────────────────────────
 
-    private string GetRepeatIcon() => Repeat switch
+    private void HandleUIAction(PlayerAction action)
     {
-        RepeatMode.RepeatOne => "🔂",
-        _ => "🔁"
-    };
+        switch (action.Type)
+        {
+            case "playpause":
+                _ = InvokeAsync(PlayPause);
+                break;
+            case "seek":
+                Seek(action.Value);
+                break;
+            case "seeking":
+                // Preview seek position (don't commit yet)
+                Seek(action.Value);
+                break;
+            case "volume":
+                SetVolume(action.Value);
+                break;
+            case "mute":
+                ToggleMute();
+                break;
+            case "fullscreen":
+                _ = InvokeAsync(ToggleFullscreen);
+                break;
+            case "shuffle":
+                ToggleShuffle();
+                break;
+            case "repeat":
+                CycleRepeat();
+                break;
+            case "prev":
+                _ = InvokeAsync(PlayPrev);
+                break;
+            case "next":
+                _ = InvokeAsync(PlayNext);
+                break;
+            case "depthscale":
+                DepthService.DepthScale = action.Value;
+                SettingsService.Settings.DepthScale = action.Value;
+                _ = InvokeAsync(async () => await SettingsService.SaveAsync());
+                PushStateToRenderer();
+                break;
+            case "depthsmoothing":
+                DepthService.TemporalSmoothing = action.Value;
+                SettingsService.Settings.DepthTemporalSmoothing = action.Value;
+                _ = InvokeAsync(async () => await SettingsService.SaveAsync());
+                PushStateToRenderer();
+                break;
+            case "depthnormalize":
+                DepthService.NormalizeEnabled = !DepthService.NormalizeEnabled;
+                SettingsService.Settings.DepthNormalize = DepthService.NormalizeEnabled;
+                _ = InvokeAsync(async () => await SettingsService.SaveAsync());
+                PushStateToRenderer();
+                break;
+            case "autoquality":
+                DepthService.AutoDepthQuality = !DepthService.AutoDepthQuality;
+                PushStateToRenderer();
+                break;
+            case "qualitybias":
+                DepthService.DepthQualityBias = action.Value;
+                PushStateToRenderer();
+                break;
+            case "temporalsmoothing":
+                DepthService.TemporalSmoothingEnabled = !DepthService.TemporalSmoothingEnabled;
+                SettingsService.Settings.DepthTemporalSmoothingEnabled = DepthService.TemporalSmoothingEnabled;
+                _ = InvokeAsync(async () => await SettingsService.SaveAsync());
+                PushStateToRenderer();
+                break;
+            case "edgethreshold":
+                DepthService.EdgeThreshold = action.Value;
+                SettingsService.Settings.DepthEdgeThreshold = action.Value;
+                _ = InvokeAsync(async () => await SettingsService.SaveAsync());
+                PushStateToRenderer();
+                break;
+            case "outputformat":
+                // Legacy cycle fallback (shouldn't trigger now that popup is used)
+                CycleOutputFormat();
+                break;
+        }
 
-    private static string FormatTime(double seconds)
-    {
-        var ts = TimeSpan.FromSeconds(seconds);
-        return ts.Hours > 0
-            ? ts.ToString(@"h\:mm\:ss")
-            : ts.ToString(@"m\:ss");
+        // Handle popup menu format selections: "inputformat:Auto", "inputformat:HalfSideBySide", etc.
+        if (action.Type.StartsWith("inputformat:"))
+        {
+            var formatValue = action.Type["inputformat:".Length..];
+            _ = InvokeAsync(() => SetInputFormatFromPopup(formatValue));
+        }
+        // Handle output format popup selections: "outputformat:Flat2D", "outputformat:Anaglyph", etc.
+        else if (action.Type.StartsWith("outputformat:"))
+        {
+            var formatValue = action.Type["outputformat:".Length..];
+            _ = InvokeAsync(() => SetOutputFormatFromPopup(formatValue));
+        }
+        // Handle auto3d popup selections: "auto3d:Off", "auto3d:AsNeeded", "auto3d:Always"
+        else if (action.Type.StartsWith("auto3d:"))
+        {
+            var modeValue = action.Type["auto3d:".Length..];
+            _ = InvokeAsync(() => SetAuto3DModeFromPopup(modeValue));
+        }
+        // Handle depth model popup selections: "depthmodel:onnx-community/..."
+        else if (action.Type.StartsWith("depthmodel:"))
+        {
+            var modelId = action.Type["depthmodel:".Length..];
+            if (modelId == "__custom__")
+            {
+                // TODO: Navigate to settings page for custom model entry
+                Console.WriteLine("[MediaPlayer] Custom model entry — navigate to settings page");
+            }
+            else
+            {
+                _ = InvokeAsync(() => SetDepthModel(modelId));
+            }
+        }
     }
 
-    public void Dispose()
+    private async Task SetDepthModel(string modelId)
     {
-        _hideTimer?.Dispose();
-        _slideshowTimer?.Dispose();
+        await DepthService.SwitchModelAsync(modelId);
+        SettingsService.Settings.DepthModel = modelId;
+        await SettingsService.SaveAsync();
+        PushStateToRenderer();
+    }
+
+    /// <summary>Set input format from popup menu selection.</summary>
+    private async Task SetInputFormatFromPopup(string formatValue)
+    {
+        if (formatValue == "Auto")
+        {
+            // Clear override, revert to auto-detected
+            _userOverrideFormat = null;
+        }
+        else if (Enum.TryParse<StereoLayout>(formatValue, out var layout))
+        {
+            _userOverrideFormat = layout;
+        }
+        else
+        {
+            return; // Unknown value, ignore
+        }
+
+        // Persist or remove the override
+        if (_currentSourceKey != null)
+        {
+            if (_userOverrideFormat != null)
+                SettingsService.Settings.InputFormatOverrides[_currentSourceKey] = _userOverrideFormat.Value.ToString();
+            else
+                SettingsService.Settings.InputFormatOverrides.Remove(_currentSourceKey);
+            await SettingsService.SaveAsync();
+        }
+
+        PushStateToRenderer();
+    }
+
+    /// <summary>Cycle output renderer through all registered renderers.</summary>
+    private void CycleOutputFormat()
+    {
+        _outputRenderer = _renderer.CycleNext(_outputRenderer);
+        ApplyOutputFormat();
+    }
+
+    /// <summary>Set output renderer from popup menu selection.</summary>
+    private async Task SetOutputFormatFromPopup(string rendererId)
+    {
+        _outputRenderer = rendererId;
+        SettingsService.Settings.OutputRenderer = rendererId;
+        await SettingsService.SaveAsync();
+        ApplyOutputFormat();
+    }
+
+    private void ApplyOutputFormat()
+    {
+        _renderer?.SetOutputRenderer(_outputRenderer);
+        if (_ui != null) _ui.StereoMode = _renderer?.IsStereo(_outputRenderer) ?? false;
+        PushStateToRenderer();
+        RestartDepthLoopIfNeeded();
+    }
+
+    /// <summary>Set auto 3D mode from popup menu selection.</summary>
+    private async Task SetAuto3DModeFromPopup(string modeValue)
+    {
+        if (Enum.TryParse<Auto3DMode>(modeValue, out var mode))
+        {
+            _auto3dMode = mode;
+            SettingsService.Settings.Auto3DMode = mode;
+            await SettingsService.SaveAsync();
+            PushStateToRenderer();
+            RestartDepthLoopIfNeeded();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Depth Estimation Loop
+    // ══════════════════════════════════════════════════════════════
+
+    /// <summary>Determines whether depth estimation should be running and starts/stops accordingly.</summary>
+    private void RestartDepthLoopIfNeeded()
+    {
+        // Depth is needed for any non-2D output mode
+        bool need3D = _outputRenderer != OutputRendererBase.Flat2DId;
+        // Depth renderers always need depth (it's the whole point of these modes)
+        bool isDepthMode = _renderer?.RequiresDepthMap(_outputRenderer) ?? false;
+        bool shouldRun = (isDepthMode || _auto3dMode != Auto3DMode.Off) && need3D && _isPlaying
+            && _renderer?.State.MediaType == MediaType.Video;
+
+        if (shouldRun && !_depthLoopRunning)
+        {
+            StartDepthLoop();
+        }
+        else if (!shouldRun && _depthLoopRunning)
+        {
+            StopDepthLoop();
+        }
+    }
+
+    private void StartDepthLoop()
+    {
+        StopDepthLoop();
+        _depthCts = new CancellationTokenSource();
+        _ = RunDepthLoop(_depthCts.Token);
+    }
+
+    private void StopDepthLoop()
+    {
+        _depthCts?.Cancel();
+        _depthCts?.Dispose();
+        _depthCts = null;
+        _depthLoopRunning = false;
+    }
+
+    /// <summary>
+    /// Async depth estimation loop. Runs continuously while the token is valid.
+    /// Captures the current video frame, estimates depth, uploads to GPU texture.
+    /// Self-throttles: only one inference at a time.
+    /// </summary>
+    private async Task RunDepthLoop(CancellationToken ct)
+    {
+        _depthLoopRunning = true;
+        try
+        {
+            // Ensure the model is loaded (downloads on first use)
+            if (_renderer != null)
+            {
+                _renderer.State.DepthProcessing = true;
+                _renderer.Invalidate();
+            }
+            await DepthService.EnsurePipelineAsync();
+
+            while (!ct.IsCancellationRequested)
+            {
+                if (_videoEl == null || _renderer == null || _videoEl.ReadyState < 2)
+                {
+                    await Task.Delay(100, ct);
+                    continue;
+                }
+
+                try
+                {
+                    var videoW = _videoEl.VideoWidth;
+                    var videoH = _videoEl.VideoHeight;
+                    if (videoW == 0 || videoH == 0)
+                    {
+                        await Task.Delay(100, ct);
+                        continue;
+                    }
+
+                    // Determine depth inference resolution
+                    var scale = DepthService.DepthScale;
+                    var depthW = (int)(videoW * scale);
+                    var depthH = (int)(videoH * scale);
+
+                    // Ensure capture canvas exists at the right size
+                    if (_depthCanvas == null || _depthCanvas.Width != depthW || _depthCanvas.Height != depthH)
+                    {
+                        _depthCtx?.Dispose();
+                        _depthCanvas?.Dispose();
+                        _depthCanvas = new OffscreenCanvas(depthW, depthH);
+                        _depthCtx = _depthCanvas.Get2DContext();
+                    }
+
+                    // Capture current video frame
+                    _depthCtx!.DrawImage(_videoEl, 0, 0, depthW, depthH);
+
+                    // Run depth estimation
+                    _renderer.State.DepthProcessing = true;
+                    using var depthFrame = await DepthService.EstimateAsync(_depthCanvas, _renderer.State.PerfStats);
+                    if (depthFrame != null && !ct.IsCancellationRequested)
+                    {
+                        // Upload depth map to GPU texture
+                        _renderer.UploadDepthTexture(depthFrame.Width, depthFrame.Height, depthFrame.Data);
+                        _renderer.State.DepthReady = true;
+                        _renderer.State.DepthProcessing = false;
+                        _renderer.Invalidate();
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Depth estimation error: {ex.Message}");
+                    await Task.Delay(500, ct);
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* expected */ }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Depth loop failed: {ex.Message}");
+        }
+        finally
+        {
+            _depthLoopRunning = false;
+            if (_renderer != null)
+            {
+                _renderer.State.DepthProcessing = false;
+                _renderer.Invalidate();
+            }
+        }
+    }
+
+    /// <summary>Cycle input format: Auto → Mono2D → SBS → OU → 2D+Z → Auto.</summary>
+    private async Task CycleInputFormat()
+    {
+        if (_userOverrideFormat == null)
+        {
+            // Currently Auto → switch to first explicit override
+            _userOverrideFormat = StereoLayout.Mono2D;
+        }
+        else
+        {
+            _userOverrideFormat = _userOverrideFormat.Value switch
+            {
+                StereoLayout.Mono2D => StereoLayout.HalfSideBySide,
+                StereoLayout.HalfSideBySide => StereoLayout.SideBySide,
+                StereoLayout.SideBySide => StereoLayout.HalfOverUnder,
+                StereoLayout.HalfOverUnder => StereoLayout.OverUnder,
+                StereoLayout.OverUnder => StereoLayout.TwoDPlusZ,
+                StereoLayout.TwoDPlusZ => null, // back to Auto
+                _ => null,
+            };
+        }
+
+        // Persist or remove the override
+        if (_currentSourceKey != null)
+        {
+            if (_userOverrideFormat != null)
+                SettingsService.Settings.InputFormatOverrides[_currentSourceKey] = _userOverrideFormat.Value.ToString();
+            else
+                SettingsService.Settings.InputFormatOverrides.Remove(_currentSourceKey);
+            await SettingsService.SaveAsync();
+        }
+
+        PushStateToRenderer();
+    }
+
+    // ── Controls Visibility ───────────────────────────────────────
+
+    private void ShowControls()
+    {
+        _controlsVisible = true;
+        PushStateToRenderer();
+        ScheduleHideControls();
+    }
+
+    private void ScheduleHideControls()
+    {
+        _hideControlsTimer?.Dispose();
+        _hideControlsTimer = new System.Threading.Timer(
+            _ => InvokeAsync(() =>
+            {
+                if (_isPlaying)
+                {
+                    _controlsVisible = false;
+                    PushStateToRenderer();
+                }
+            }),
+            null, 5000, System.Threading.Timeout.Infinite);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Query Parameter Handling
+    // ══════════════════════════════════════════════════════════════
+
+    private async Task LoadFromQueryParams()
+    {
+        var uri = new Uri(NavManager.Uri);
+        var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+        var src = query["src"];
+        if (!string.IsNullOrEmpty(src))
+        {
+            _playlist.Clear();
+            _playlist.Add(new PlaylistItem { Url = src, Title = Path.GetFileName(src) });
+            _playlistIndex = 0;
+            await LoadCurrentItem();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 3D Format Auto-Detection
+    // ══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Detect stereo layout from filename hints using word-boundary regex.
+    /// Returns layout and optional mosaic grid (e.g. "3x3").
+    /// </summary>
+    private static (StereoLayout layout, string? mosaicGrid) DetectStereoLayout(string filename)
+    {
+        var name = Path.GetFileNameWithoutExtension(filename);
+
+        // Half SBS: matches "HSBS", "H-SBS", "half-sbs", "half_sbs", "halfsbs"
+        if (System.Text.RegularExpressions.Regex.IsMatch(name, @"\b(hsbs|h[\-_]?sbs|half[\-_]?sbs)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return (StereoLayout.HalfSideBySide, null);
+
+        // Full SBS: matches bare "SBS" (not preceded by "h" or "half")
+        if (System.Text.RegularExpressions.Regex.IsMatch(name, @"\bsbs\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return (StereoLayout.SideBySide, null);
+
+        // Half OU: matches "HOU", "H-OU", "half-ou", "TAB", "TB", "ABL"
+        if (System.Text.RegularExpressions.Regex.IsMatch(name, @"\b(hou|h[\-_]?ou|half[\-_]?ou|tab|tb|abl)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return (StereoLayout.HalfOverUnder, null);
+
+        // Full OU: matches bare "OU"
+        if (System.Text.RegularExpressions.Regex.IsMatch(name, @"\bou\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return (StereoLayout.OverUnder, null);
+
+        // 2D+Z / depth: matches "2DZ", "2D+Z", "2D_Z", "depth"
+        if (System.Text.RegularExpressions.Regex.IsMatch(name, @"\b(2d[+_]?z|depth)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return (StereoLayout.TwoDPlusZ, null);
+
+        // Mosaic: standalone single-digit grid like "3x3", "4x3", "2x2"
+        // Single digits only (1-9) to avoid matching resolutions like "1920x1080"
+        var mosaicMatch = System.Text.RegularExpressions.Regex.Match(name, @"\b([1-9])x([1-9])\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (mosaicMatch.Success)
+        {
+            var grid = $"{mosaicMatch.Groups[1].Value}x{mosaicMatch.Groups[2].Value}";
+            return (StereoLayout.Mosaic, grid);
+        }
+
+        // "3D" alone is ambiguous — default to half SBS (most common for generic 3D-tagged content)
+        if (System.Text.RegularExpressions.Regex.IsMatch(name, @"\b3d\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return (StereoLayout.HalfSideBySide, null);
+
+        return (StereoLayout.Mono2D, null);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Utilities
+    // ══════════════════════════════════════════════════════════════
+
+    private static MediaType DetectMediaType(string url, string? mimeType)
+    {
+        if (!string.IsNullOrEmpty(mimeType))
+        {
+            if (mimeType.StartsWith("video/")) return MediaType.Video;
+            if (mimeType.StartsWith("audio/")) return MediaType.Audio;
+            if (mimeType.StartsWith("image/")) return MediaType.Image;
+        }
+
+        var ext = Path.GetExtension(url)?.ToLowerInvariant();
+        return ext switch
+        {
+            ".mp4" or ".webm" or ".mkv" or ".avi" or ".mov" or ".ogv" => MediaType.Video,
+            ".mp3" or ".ogg" or ".wav" or ".flac" or ".aac" or ".m4a" or ".opus" => MediaType.Audio,
+            ".jpg" or ".jpeg" or ".png" or ".gif" or ".webp" or ".bmp" or ".svg" or ".avif" => MediaType.Image,
+            _ => MediaType.Video, // Default to video
+        };
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Disposal
+    // ══════════════════════════════════════════════════════════════
+
+    public async ValueTask DisposeAsync()
+    {
+        StopDepthLoop();
         _timeUpdateTimer?.Dispose();
+        _slideshowTimer?.Dispose();
+        _hideControlsTimer?.Dispose();
+
+        // Detach media events
+        if (_videoEl != null) _videoEl.OnEnded -= OnMediaEnded;
+        if (_audioEl != null) _audioEl.OnEnded -= OnMediaEnded;
+
+        // Dispose loading image
+        _loadingImage?.Dispose();
+        _loadingImage = null;
+
+        // Dispose depth canvas
+        _depthCtx?.Dispose();
+        _depthCanvas?.Dispose();
+
+        _renderer?.Dispose();
+        _audioContext?.Dispose();
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Models
+    // ══════════════════════════════════════════════════════════════
+
+    public class PlaylistItem
+    {
+        public string Url { get; set; } = "";
+        public string? Title { get; set; }
+        public string? MimeType { get; set; }
     }
 }

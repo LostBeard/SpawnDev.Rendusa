@@ -51,6 +51,26 @@ Use `MessageEvent.GetData<T>()` with a DTO class to deserialize incoming message
 var data = messageEvent.GetData<MyMessageDto>();
 ```
 
+## Events and ActionEvent
+ActionEvent properties on JSObject wrappers (e.g. `port.OnMessage`, `element.OnClick`) handle `ActionCallback` creation and disposal automatically when you use delegates directly with `+=` and `-=`. **Prefer this approach** over explicitly creating `ActionCallback` instances:
+
+```csharp
+// PREFERRED — delegate directly, ActionCallback managed automatically
+port.OnMessage += HandleMessage;
+// later:
+port.OnMessage -= HandleMessage;
+
+async void HandleMessage(MessageEvent e) { /* ... */ }
+```
+
+```csharp
+// ACCEPTABLE — only when you need manual lifecycle control (e.g. tracking in a CallbackGroup)
+var cb = new ActionCallback<MessageEvent>(HandleMessage);
+_callbacks.Add(cb);
+port.OnMessage += cb;
+// manual cleanup needed: port.OnMessage -= cb; cb.Dispose();
+```
+
 ## IDisposable
 All JS object wrappers implement `IDisposable`. Use `using` statements to prevent memory leaks:
 
@@ -58,3 +78,4 @@ All JS object wrappers implement `IDisposable`. Use `using` statements to preven
 using var blob = await file.ReadRangeBlobAsync(offset, length);
 using var arrayBuffer = await blob.ArrayBuffer();
 ```
+

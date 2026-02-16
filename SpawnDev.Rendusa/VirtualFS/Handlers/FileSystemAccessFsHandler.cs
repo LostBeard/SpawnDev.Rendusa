@@ -22,17 +22,7 @@ public class FileSystemAccessFsHandler : IWritableFsHandler, IDisposable
     private readonly string _mountPath;
     private bool _accessVerified = false;
 
-    private static readonly Dictionary<string, string> ExtToMime = new(StringComparer.OrdinalIgnoreCase)
-    {
-        { ".mp4", "video/mp4" }, { ".webm", "video/webm" }, { ".mkv", "video/x-matroska" },
-        { ".avi", "video/x-msvideo" }, { ".mov", "video/quicktime" }, { ".ogv", "video/ogg" },
-        { ".mp3", "audio/mpeg" }, { ".ogg", "audio/ogg" }, { ".wav", "audio/wav" },
-        { ".flac", "audio/flac" }, { ".aac", "audio/aac" }, { ".m4a", "audio/mp4" },
-        { ".opus", "audio/opus" },
-        { ".jpg", "image/jpeg" }, { ".jpeg", "image/jpeg" }, { ".png", "image/png" },
-        { ".gif", "image/gif" }, { ".webp", "image/webp" }, { ".svg", "image/svg+xml" },
-        { ".bmp", "image/bmp" }, { ".avif", "image/avif" },
-    };
+    private static Dictionary<string, string> ExtToMime => MimeTypes.ExtToMime;
 
     public FileSystemAccessFsHandler(FileSystemDirectoryHandle handle, string displayName, string mountPath, bool readOnly = false)
     {

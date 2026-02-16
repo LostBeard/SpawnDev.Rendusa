@@ -2,5 +2,9 @@
   <Folder Name="/Solution Items/">
     <File Path="README.md" />
   </Folder>
+  <Project Path="../../SpawnDev.BlazorJS/SpawnDev.BlazorJS/SpawnDev.BlazorJS/SpawnDev.BlazorJS.csproj" />
+  <Project Path="../../SpawnDev.ILGPU/SpawnDev.ILGPU/SpawnDev.ILGPU/SpawnDev.ILGPU.csproj" />
   <Project Path="SpawnDev.Rendusa/SpawnDev.Rendusa.csproj" />
+  <Project Path="../../SpawnDev.BlazorJS.TransformersJS/SpawnDev.BlazorJS.TransformersJS/SpawnDev.BlazorJS.TransformersJS/SpawnDev.BlazorJS.TransformersJS.csproj" />
+  <Project Path="../../SpawnDev.BlazorJS.WebTorrents/SpawnDev.BlazorJS.WebTorrents/SpawnDev.BlazorJS.WebTorrents/SpawnDev.BlazorJS.WebTorrents.csproj" />
 </Solution>

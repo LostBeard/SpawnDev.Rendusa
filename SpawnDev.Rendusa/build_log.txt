@@ -1,0 +1,10 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  SpawnDev.Rendusa -> D:\users\tj\Projects\SpawnDev.Rendusa\SpawnDev.Rendusa\SpawnDev.Rendusa\bin\Debug\net10.0\SpawnDev.Rendusa.dll
+  SpawnDev.Rendusa (Blazor output) -> D:\users\tj\Projects\SpawnDev.Rendusa\SpawnDev.Rendusa\SpawnDev.Rendusa\bin\Debug\net10.0\wwwroot
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.02

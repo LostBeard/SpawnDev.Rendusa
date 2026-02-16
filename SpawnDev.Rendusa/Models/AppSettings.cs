@@ -77,4 +77,44 @@ public class AppSettings
 
     /// <summary>Enable HTTP source provider for public media URLs.</summary>
     public bool HttpProviderEnabled { get; set; } = false;
+
+    // === Renderer / 3D ===
+
+    /// <summary>Output renderer ID: "flat2d", "anaglyph", "sbs", "ou", etc.</summary>
+    public string OutputRenderer { get; set; } = "flat2d";
+
+    /// <summary>3D depth adjustment (0.0–1.0).</summary>
+    public double Depth3D { get; set; } = 0.5;
+
+    /// <summary>3D convergence / zero-parallax adjustment (0.0–1.0).</summary>
+    public double Convergence3D { get; set; } = 0.5;
+
+    /// <summary>Controls when monocular depth estimation generates 3D views: Off, AsNeeded, Always.</summary>
+    public Auto3DMode Auto3DMode { get; set; } = Auto3DMode.AsNeeded;
+
+    /// <summary>Anaglyph color profile: "RedCyan", "GreenMagenta", "Custom".</summary>
+    public string AnaglyphProfile { get; set; } = "RedCyan";
+
+    /// <summary>Persisted per-source input format overrides. Key = source URI or filename.</summary>
+    public Dictionary<string, string> InputFormatOverrides { get; set; } = new();
+
+    // === Depth Estimation ===
+
+    /// <summary>Depth model ID (e.g. "onnx-community/depth-anything-v2-small").</summary>
+    public string DepthModel { get; set; } = "onnx-community/depth-anything-v2-small";
+
+    /// <summary>Depth inference scale (0.25–1.0). Lower = faster, less detail.</summary>
+    public double DepthScale { get; set; } = 0.5;
+
+    /// <summary>Whether to apply global min/max depth normalization.</summary>
+    public bool DepthNormalize { get; set; } = true;
+
+    /// <summary>Temporal smoothing factor (0.0–1.0). 1.0 = no smoothing.</summary>
+    public float DepthTemporalSmoothing { get; set; } = 0.7f;
+
+    /// <summary>Whether temporal depth smoothing is enabled.</summary>
+    public bool DepthTemporalSmoothingEnabled { get; set; } = true;
+
+    /// <summary>Edge-aware threshold for temporal smoothing (0.0–1.0). Default 0.1.</summary>
+    public float DepthEdgeThreshold { get; set; } = 0.1f;
 }

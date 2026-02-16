@@ -25,20 +25,7 @@ public class OpfsFsHandler : IWritableFsHandler
     private readonly string _profileName;
     private FileSystemDirectoryHandle? _root;
 
-    private static readonly Dictionary<string, string> ExtToMime = new(StringComparer.OrdinalIgnoreCase)
-    {
-        { ".mp4", "video/mp4" }, { ".webm", "video/webm" }, { ".mkv", "video/x-matroska" },
-        { ".avi", "video/x-msvideo" }, { ".mov", "video/quicktime" }, { ".ogv", "video/ogg" },
-        { ".mp3", "audio/mpeg" }, { ".ogg", "audio/ogg" }, { ".wav", "audio/wav" },
-        { ".flac", "audio/flac" }, { ".aac", "audio/aac" }, { ".m4a", "audio/mp4" },
-        { ".opus", "audio/opus" },
-        { ".jpg", "image/jpeg" }, { ".jpeg", "image/jpeg" }, { ".png", "image/png" },
-        { ".gif", "image/gif" }, { ".webp", "image/webp" }, { ".svg", "image/svg+xml" },
-        { ".bmp", "image/bmp" }, { ".avif", "image/avif" },
-        { ".json", "application/json" }, { ".mount", "application/json" },
-        { ".m3u8", "application/vnd.apple.mpegurl" }, { ".m3u", "audio/x-mpegurl" },
-        { ".txt", "text/plain" }, { ".pdf", "application/pdf" },
-    };
+    private static Dictionary<string, string> ExtToMime => MimeTypes.ExtToMime;
 
     public OpfsFsHandler(BlazorJSRuntime js, string profileName = "default")
     {

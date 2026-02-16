@@ -10,7 +10,7 @@ namespace SpawnDev.Rendusa.Services;
 public class SettingsService : IAsyncBackgroundService
 {
     private const string DbName = "RendusaDB";
-    private const int DbVersion = 4;
+    private const int DbVersion = 5; // Must match MediaLibraryService
     private const string SettingsStoreName = "settings";
     private const string SettingsKey = "appSettings";
 

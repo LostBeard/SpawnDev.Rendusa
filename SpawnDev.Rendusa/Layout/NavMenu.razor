@@ -1,4 +1,6 @@
 ﻿@inject MediaLibraryService MediaLibrary
+@using SpawnDev.Rendusa.VirtualFS
+@implements IDisposable
 
 <div class="nav-brand">
     <span class="brand-icon">🎬</span>
@@ -19,21 +21,25 @@
         <span class="nav-icon">⚙</span>
         <span class="nav-label">Settings</span>
     </NavLink>
+    <NavLink class="nav-item" href="vfstest">
+        <span class="nav-icon">🧪</span>
+        <span class="nav-label">VFS Tests</span>
+    </NavLink>
 </nav>
 
 <div class="nav-section-label">PLAYLIST</div>
 <div class="playlist-sidebar">
-    @if (MediaLibrary.Playlists.Count == 0)
+    @if (_playlists.Count == 0)
     {
         <div class="playlist-empty">No playlists yet</div>
     }
     else
     {
-        @foreach (var pl in MediaLibrary.Playlists)
+        @foreach (var pl in _playlists)
         {
-            <NavLink class="nav-item playlist-item" href="@($"player?playlist={pl.Id}")">
+            <NavLink class="nav-item playlist-item" href="@($"library?open={Uri.EscapeDataString(pl.Path)}")">
                 <span class="nav-icon">🎵</span>
-                <span class="nav-label truncate">@pl.Name</span>
+                <span class="nav-label truncate">@pl.Name.Replace(".m3u8", "")</span>
             </NavLink>
         }
     }
@@ -46,8 +52,79 @@
 @code {
     [Parameter] public EventCallback OnToggleSidebar { get; set; }
 
+    private List<PlaylistEntry> _playlists = new();
+
     protected override void OnInitialized()
     {
-        MediaLibrary.OnChanged += () => InvokeAsync(StateHasChanged);
+        MediaLibrary.OnChanged += RefreshPlaylists;
+        MediaLibrary.VFS.OnContentChanged += OnVfsChanged;
+        MediaLibrary.VFS.OnMountsChanged += RefreshPlaylists;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ScanPlaylistsAsync();
+    }
+
+    private void OnVfsChanged(VfsChangeEventArgs e)
+    {
+        // Refresh if a .m3u8 file changed anywhere
+        if (e.Path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+        {
+            _ = InvokeAsync(async () =>
+            {
+                await ScanPlaylistsAsync();
+                StateHasChanged();
+            });
+        }
+    }
+
+    private void RefreshPlaylists()
+    {
+        _ = InvokeAsync(async () =>
+        {
+            await ScanPlaylistsAsync();
+            StateHasChanged();
+        });
+    }
+
+    private async Task ScanPlaylistsAsync()
+    {
+        var results = new List<PlaylistEntry>();
+        try
+        {
+            await ScanDirectoryForPlaylists("/", results);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"NavMenu: error scanning playlists: {ex.Message}");
+        }
+        _playlists = results;
+    }
+
+    private async Task ScanDirectoryForPlaylists(string path, List<PlaylistEntry> results)
+    {
+        var nodes = await MediaLibrary.VFS.ListDirectoryAsync(path);
+        foreach (var node in nodes)
+        {
+            if (node is SpawnDev.Rendusa.VirtualFS.IVfsFile file &&
+                file.Name.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+            {
+                results.Add(new PlaylistEntry { Name = file.Name, Path = file.Path });
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        MediaLibrary.OnChanged -= RefreshPlaylists;
+        MediaLibrary.VFS.OnContentChanged -= OnVfsChanged;
+        MediaLibrary.VFS.OnMountsChanged -= RefreshPlaylists;
+    }
+
+    private class PlaylistEntry
+    {
+        public string Name { get; set; } = "";
+        public string Path { get; set; } = "";
     }
 }

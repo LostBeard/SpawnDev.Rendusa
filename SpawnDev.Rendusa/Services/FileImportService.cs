@@ -1,6 +1,7 @@
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.Rendusa.Models;
+using SpawnDev.Rendusa.VirtualFS;
 using JSFile = SpawnDev.BlazorJS.JSObjects.File;
 
 namespace SpawnDev.Rendusa.Services;
@@ -44,18 +45,7 @@ public class FileImportService
     };
 
     // Fallback: known extensions when MIME is empty
-    private static readonly Dictionary<string, string> ExtensionToMime = new(StringComparer.OrdinalIgnoreCase)
-    {
-        { ".mp4", "video/mp4" }, { ".webm", "video/webm" }, { ".mkv", "video/x-matroska" },
-        { ".avi", "video/x-msvideo" }, { ".mov", "video/quicktime" }, { ".ogv", "video/ogg" },
-        { ".mp3", "audio/mpeg" }, { ".ogg", "audio/ogg" }, { ".wav", "audio/wav" },
-        { ".flac", "audio/flac" }, { ".aac", "audio/aac" }, { ".m4a", "audio/mp4" },
-        { ".wma", "audio/x-ms-wma" }, { ".opus", "audio/opus" },
-        { ".jpg", "image/jpeg" }, { ".jpeg", "image/jpeg" }, { ".png", "image/png" },
-        { ".gif", "image/gif" }, { ".webp", "image/webp" }, { ".svg", "image/svg+xml" },
-        { ".bmp", "image/bmp" }, { ".ico", "image/x-icon" }, { ".avif", "image/avif" },
-        { ".jxl", "image/jxl" },
-    };
+    private static Dictionary<string, string> ExtensionToMime => MimeTypes.ExtToMime;
 
     public FileImportService(MediaLibraryService library)
     {

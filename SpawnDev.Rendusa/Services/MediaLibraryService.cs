@@ -14,23 +14,15 @@ namespace SpawnDev.Rendusa.Services;
 public class MediaLibraryService : IAsyncBackgroundService, IMountHandlerFactory
 {
     private const string DbName = "RendusaDB";
-    private const int DbVersion = 4;
-    private const string MediaStoreName = "mediaItems";
-    private const string PlaylistStoreName = "playlists";
-    private const string LinkedFolderStoreName = "linkedFolders";
+    private const int DbVersion = 5;
     private const string HandleStoreName = "handles";
+    private const string MediaStoreName = "mediaItems";
     private const string BlobStoreName = "blobStore";
     private const string SettingsStoreName = "settings";
-
-    // Legacy stores (dropped in v3 migration)
-    private const string LegacyFileHandlesStore = "fileHandles";
-    private const string LegacyFolderHandlesStore = "folderHandles";
 
     private IDBDatabase? _db;
 
     public List<MediaItem> MediaItems { get; private set; } = new();
-    public List<Playlist> Playlists { get; private set; } = new();
-    public List<LinkedFolder> LinkedFolders { get; private set; } = new();
 
     /// <summary>
     /// The Virtual File System instance. Available after Ready completes.
@@ -67,43 +59,20 @@ public class MediaLibraryService : IAsyncBackgroundService, IMountHandlerFactory
             var stores = db.ObjectStoreNames;
 
             // Create stores if missing
-            if (!stores.Contains(MediaStoreName))
-            {
-                db.CreateObjectStore<string, MediaItem>(MediaStoreName);
-            }
-            if (!stores.Contains(PlaylistStoreName))
-            {
-                db.CreateObjectStore<string, Playlist>(PlaylistStoreName);
-            }
-            if (!stores.Contains(LinkedFolderStoreName))
-            {
-                db.CreateObjectStore<string, LinkedFolder>(LinkedFolderStoreName);
-            }
-
-            // Unified handles store (FileSystemHandle keyed by ID)
-            if (stores.Contains(LegacyFileHandlesStore))
-            {
-                db.DeleteObjectStore(LegacyFileHandlesStore);
-            }
-            if (stores.Contains(LegacyFolderHandlesStore))
-            {
-                db.DeleteObjectStore(LegacyFolderHandlesStore);
-            }
             if (!stores.Contains(HandleStoreName))
-            {
                 db.CreateObjectStore<string, FileSystemHandle>(HandleStoreName);
-            }
-
-            // Blob store (raw file data keyed by InternalBlobKey)
+            if (!stores.Contains(MediaStoreName))
+                db.CreateObjectStore<string, MediaItem>(MediaStoreName);
             if (!stores.Contains(BlobStoreName))
-            {
                 db.CreateObjectStore<string, Blob>(BlobStoreName);
-            }
-
-            // v4: Settings store
             if (!stores.Contains(SettingsStoreName))
-            {
                 db.CreateObjectStore<string, object>(SettingsStoreName);
+
+            // v5: drop legacy stores if leftover
+            foreach (var legacy in new[] { "fileHandles", "folderHandles", "linkedFolders", "playlists" })
+            {
+                if (stores.Contains(legacy))
+                    db.DeleteObjectStore(legacy);
             }
         });
         await LoadAllAsync();
@@ -131,76 +100,10 @@ public class MediaLibraryService : IAsyncBackgroundService, IMountHandlerFactory
         // Register as mount factory for "filesystem-access" mount type
         VFS.RegisterMountFactory(this);
 
-        // Migrate legacy linked folders from IDB → .mount files (one-time)
-        await MigrateLegacyLinkedFoldersAsync();
-
-        // Scan all .mount files in OPFS and resolve via registered factories
-        await ScanAndResolveMountFilesAsync();
-    }
-
-    /// <summary>
-    /// Migrate legacy linked folders from IDB linkedFolders store to .mount files.
-    /// The FileSystemHandle is re-keyed from mountPath to a new UUID handleId.
-    /// </summary>
-    private async Task MigrateLegacyLinkedFoldersAsync()
-    {
-        if (_db == null || OpfsHandler == null) return;
-        if (LinkedFolders.Count == 0) return;
-
-        var migrated = 0;
-        foreach (var folder in LinkedFolders.ToList())
-        {
-            try
-            {
-                var mountPath = $"/{folder.DisplayName}";
-                var mountFileName = $"{folder.DisplayName}.mount";
-
-                // Skip if .mount file already exists
-                var existing = await OpfsHandler.ReadTextAsync(mountFileName);
-                if (existing != null) continue;
-
-                // Get the legacy handle (keyed by mount path)
-                var handle = await GetHandleAsync(mountPath);
-                if (handle is not FileSystemDirectoryHandle) continue;
-
-                // Generate new UUID key and re-store the handle
-                var handleId = Guid.NewGuid().ToString();
-                await StoreHandleAsync(handleId, handle);
-
-                // Write .mount file
-                var descriptor = new MountDescriptor
-                {
-                    HandlerType = "filesystem-access",
-                    Properties = new Dictionary<string, string>
-                    {
-                        ["handleId"] = handleId,
-                        ["displayName"] = folder.DisplayName,
-                        ["originalName"] = folder.OriginalName
-                    }
-                };
-                await OpfsHandler.WriteTextAsync(mountFileName, descriptor.ToJson());
-
-                // Remove legacy handle keyed by mount path
-                await RemoveHandleAsync(mountPath);
-                migrated++;
-
-                Console.WriteLine($"MediaLibrary: migrated linked folder \"{folder.DisplayName}\" → {mountFileName}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"MediaLibrary: migration error for \"{folder.DisplayName}\": {ex.Message}");
-            }
-        }
-
-        if (migrated > 0)
-        {
-            // Clear legacy IDB linkedFolders store
-            using var tx = _db.Transaction(LinkedFolderStoreName, true);
-            using var store = tx.ObjectStore<string, LinkedFolder>(LinkedFolderStoreName);
-            await store.ClearAsync();
-            LinkedFolders.Clear();
-            Console.WriteLine($"MediaLibrary: legacy linked folder migration complete ({migrated} folders)");
-        }
+        // Scan all .mount files in OPFS and resolve via registered factories.
+        // Fire-and-forget: mount resolution (especially WebTorrent) can block
+        // for a long time waiting for tracker/peer connections, so don't block startup.
+        _ = ScanAndResolveMountFilesAsync();
     }
 
     // === IMountHandlerFactory ===
@@ -219,7 +122,17 @@ public class MediaLibraryService : IAsyncBackgroundService, IMountHandlerFactory
         var handle = await GetHandleAsync(handleId);
         if (handle is not FileSystemDirectoryHandle dirHandle)
         {
-            Console.WriteLine($"MediaLibrary: handle not found for handleId={handleId}");
+            Console.WriteLine($"MediaLibrary: handle not found or not a directory for handleId={handleId}");
+            handle?.Dispose();
+            return null;
+        }
+
+        // Re-request permission from the browser (handles lose permission on page reload)
+        var hasPermission = await dirHandle.VerifyPermission(readWrite: !readOnly, askIfNeeded: true);
+        if (!hasPermission)
+        {
+            Console.WriteLine($"MediaLibrary: permission denied for \"{displayName}\" (handleId={handleId})");
+            dirHandle.Dispose();
             return null;
         }
 
@@ -286,22 +199,6 @@ public class MediaLibraryService : IAsyncBackgroundService, IMountHandlerFactory
             using var items = await store.GetAllAsync();
             MediaItems = items.ToList();
         }
-
-        // Load playlists
-        {
-            using var tx = _db.Transaction(PlaylistStoreName);
-            using var store = tx.ObjectStore<string, Playlist>(PlaylistStoreName);
-            using var items = await store.GetAllAsync();
-            Playlists = items.ToList();
-        }
-
-        // Load linked folders
-        {
-            using var tx = _db.Transaction(LinkedFolderStoreName);
-            using var store = tx.ObjectStore<string, LinkedFolder>(LinkedFolderStoreName);
-            using var items = await store.GetAllAsync();
-            LinkedFolders = items.ToList();
-        }
     }
 
     // === Handle Store (unified) ===
@@ -318,19 +215,32 @@ public class MediaLibraryService : IAsyncBackgroundService, IMountHandlerFactory
     }
 
     /// <summary>
-    /// Retrieve a FileSystemHandle by its VFS path.
+    /// Retrieve a FileSystemHandle by its key (handleId).
+    /// Uses JSObject store type and checks kind to return the correct subclass,
+    /// since IDB deserialization doesn't reconstruct JSObject subclasses automatically.
     /// </summary>
-    public async Task<FileSystemHandle?> GetHandleAsync(string vfsPath)
+    public async Task<FileSystemHandle?> GetHandleAsync(string key)
     {
         if (_db == null) return null;
         try
         {
             using var tx = _db.Transaction(HandleStoreName);
-            using var store = tx.ObjectStore<string, FileSystemHandle>(HandleStoreName);
-            return await store.GetAsync(vfsPath);
+            using var store = tx.ObjectStore<string, JSObject>(HandleStoreName);
+            var raw = await store.GetAsync(key);
+            if (raw == null) return null;
+
+            // Check kind to return the correct C# subclass
+            var kind = raw.JSRef!.Get<string>("kind");
+            return kind switch
+            {
+                "directory" => raw.JSRefAs<FileSystemDirectoryHandle>(),
+                "file" => raw.JSRefAs<FileSystemFileHandle>(),
+                _ => raw.JSRefAs<FileSystemHandle>()
+            };
         }
-        catch
+        catch (Exception ex)
         {
+            Console.WriteLine($"MediaLibrary: GetHandleAsync({key}) exception: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }
@@ -478,39 +388,6 @@ public class MediaLibraryService : IAsyncBackgroundService, IMountHandlerFactory
         await UpdateMediaItemAsync(item);
     }
 
-    // === Playlists ===
-
-    public async Task AddPlaylistAsync(Playlist playlist)
-    {
-        if (_db == null) return;
-        Playlists.Add(playlist);
-        using var tx = _db.Transaction(PlaylistStoreName, true);
-        using var store = tx.ObjectStore<string, Playlist>(PlaylistStoreName);
-        await store.PutAsync(playlist, playlist.Id);
-        OnChanged?.Invoke();
-    }
-
-    public async Task UpdatePlaylistAsync(Playlist playlist)
-    {
-        if (_db == null) return;
-        var index = Playlists.FindIndex(p => p.Id == playlist.Id);
-        if (index >= 0) Playlists[index] = playlist;
-        playlist.DateModified = DateTime.UtcNow;
-        using var tx = _db.Transaction(PlaylistStoreName, true);
-        using var store = tx.ObjectStore<string, Playlist>(PlaylistStoreName);
-        await store.PutAsync(playlist, playlist.Id);
-        OnChanged?.Invoke();
-    }
-
-    public async Task RemovePlaylistAsync(string id)
-    {
-        if (_db == null) return;
-        Playlists.RemoveAll(p => p.Id == id);
-        using var tx = _db.Transaction(PlaylistStoreName, true);
-        using var store = tx.ObjectStore<string, Playlist>(PlaylistStoreName);
-        await store.DeleteAsync(id);
-        OnChanged?.Invoke();
-    }
 
     // === Linked Folders ===
 

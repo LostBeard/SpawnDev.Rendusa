@@ -592,6 +592,55 @@ input[type="range"]::-moz-range-thumb {
     color: #94a3b8;
 }
 
+/* Torrent status badges */
+.badge-complete {
+    background: rgba(76, 175, 80, 0.2);
+    color: #66bb6a;
+    text-transform: none;
+}
+
+.badge-downloading {
+    background: rgba(255, 109, 0, 0.2);
+    color: var(--accent, #ff6d00);
+    text-transform: none;
+}
+
+.badge-paused {
+    background: rgba(148, 163, 184, 0.15);
+    color: #94a3b8;
+    text-transform: none;
+}
+
+.badge-stalled {
+    background: rgba(255, 193, 7, 0.15);
+    color: #ffc107;
+    text-transform: none;
+}
+
+.torrent-status-line {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.2rem;
+    flex-wrap: wrap;
+}
+
+.torrent-speed {
+    font-size: 0.6rem;
+    color: var(--accent, #ff6d00);
+    font-weight: 500;
+}
+
+.torrent-peers {
+    font-size: 0.6rem;
+    color: var(--text-muted);
+}
+
+.torrent-peers-zero {
+    color: #ef4444;
+    opacity: 0.7;
+}
+
 /* -- Context menu -- */
 .context-menu-backdrop {
     position: fixed;

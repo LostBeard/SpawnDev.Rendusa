@@ -54,8 +54,16 @@ public class MediaFormat
 public enum StereoLayout
 {
     Mono2D,
+    /// <summary>Full side-by-side: each eye is at full resolution, frame is 2× wide.</summary>
     SideBySide,
+    /// <summary>Half side-by-side: each eye is horizontally squeezed into half the frame width.</summary>
+    HalfSideBySide,
+    /// <summary>Full over-under: each eye is at full resolution, frame is 2× tall.</summary>
     OverUnder,
+    /// <summary>Half over-under: each eye is vertically squeezed into half the frame height.</summary>
+    HalfOverUnder,
     Mosaic,
+    /// <summary>Half-width mosaic: each tile is horizontally squeezed to half its display width.</summary>
+    HalfMosaic,
     TwoDPlusZ
 }

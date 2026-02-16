@@ -21,12 +21,38 @@
     border-right: none;
 }
 
+.main-content.sidebar-hidden {
+    padding-left: 2.75rem;
+}
+
 .main-content {
     flex: 1;
     overflow-y: auto;
     background: var(--bg-primary);
     display: flex;
     flex-direction: column;
+}
+
+/* Floating toggle button visible when sidebar is collapsed */
+.sidebar-toggle-floating {
+    display: block;
+    position: fixed;
+    top: 0.55rem;
+    left: 0.55rem;
+    z-index: 200;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    font-size: 1.1rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    box-shadow: var(--shadow-md);
+    transition: opacity 200ms ease;
+}
+
+.sidebar-toggle-floating:hover {
+    background: var(--bg-hover);
 }
 
 @media (max-width: 768px) {

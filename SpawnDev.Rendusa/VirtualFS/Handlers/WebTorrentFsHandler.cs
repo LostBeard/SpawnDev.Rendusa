@@ -13,8 +13,8 @@ public class WebTorrentFsHandler : IFsHandler
     public string DisplayName { get; }
 
     private readonly WebTorrentService _wtService;
-    /// <summary>The magnet URI, info hash, or URL used to seed this torrent.</summary>
-    public string? TorrentSource { get; }
+    /// <summary>The magnet URI identifying this torrent (set after torrent is ready).</summary>
+    public string? TorrentSource { get; set; }
     private readonly byte[]? _torrentFileData;
     private Torrent? _torrent;
     private TorrentTreeNode? _root;
@@ -22,9 +22,106 @@ public class WebTorrentFsHandler : IFsHandler
     private DateTime _lastProgressNotify = DateTime.MinValue;
     private Action<long>? _onDownloadCallback;
     private Action? _onDoneCallback;
+    private readonly HashSet<string> _selectedFiles = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Fired when torrent content changes (pieces downloaded, torrent complete).</summary>
     public event Action<VfsChangeEventArgs>? OnContentChanged;
+
+    // === Per-file download control ===
+
+    /// <summary>Select a single file for download by its relative path within the torrent.</summary>
+    public bool SelectFile(string relativePath)
+    {
+        relativePath = relativePath.TrimStart('/');
+        var node = WalkTree(relativePath);
+        if (node == null || !node.IsFile || node.TorrentFile == null) return false;
+        node.TorrentFile.Select();
+        _selectedFiles.Add(relativePath);
+        return true;
+    }
+
+    /// <summary>Deselect a single file (pause download) by its relative path within the torrent.</summary>
+    public bool DeselectFile(string relativePath)
+    {
+        relativePath = relativePath.TrimStart('/');
+        var node = WalkTree(relativePath);
+        if (node == null || !node.IsFile || node.TorrentFile == null) return false;
+        node.TorrentFile.Deselect();
+        _selectedFiles.Remove(relativePath);
+        return true;
+    }
+
+    /// <summary>Select all files in a directory recursively for download.</summary>
+    public int SelectDirectory(string relativePath)
+    {
+        relativePath = relativePath.TrimStart('/');
+        var parent = string.IsNullOrEmpty(relativePath) ? _root : WalkTree(relativePath);
+        if (parent == null || parent.IsFile) return 0;
+        return SelectAllInNode(parent, relativePath);
+    }
+
+    /// <summary>Deselect all files in a directory recursively (pause all downloads).</summary>
+    public int DeselectDirectory(string relativePath)
+    {
+        relativePath = relativePath.TrimStart('/');
+        var parent = string.IsNullOrEmpty(relativePath) ? _root : WalkTree(relativePath);
+        if (parent == null || parent.IsFile) return 0;
+        return DeselectAllInNode(parent, relativePath);
+    }
+
+    /// <summary>Check if a file is currently selected for download.</summary>
+    public bool IsFileSelected(string relativePath)
+    {
+        return _selectedFiles.Contains(relativePath.TrimStart('/'));
+    }
+
+    /// <summary>Check if any file in a directory is currently selected for download.</summary>
+    public bool HasSelectedFilesInDirectory(string relativePath)
+    {
+        relativePath = relativePath.TrimStart('/');
+        var prefix = string.IsNullOrEmpty(relativePath) ? "" : relativePath + "/";
+        return _selectedFiles.Any(f => f.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private int SelectAllInNode(TorrentTreeNode node, string basePath)
+    {
+        int count = 0;
+        foreach (var child in node.Children.Values)
+        {
+            var childPath = string.IsNullOrEmpty(basePath) ? child.Name : $"{basePath}/{child.Name}";
+            if (child.IsFile && child.TorrentFile != null)
+            {
+                child.TorrentFile.Select();
+                _selectedFiles.Add(childPath);
+                count++;
+            }
+            else
+            {
+                count += SelectAllInNode(child, childPath);
+            }
+        }
+        return count;
+    }
+
+    private int DeselectAllInNode(TorrentTreeNode node, string basePath)
+    {
+        int count = 0;
+        foreach (var child in node.Children.Values)
+        {
+            var childPath = string.IsNullOrEmpty(basePath) ? child.Name : $"{basePath}/{child.Name}";
+            if (child.IsFile && child.TorrentFile != null)
+            {
+                child.TorrentFile.Deselect();
+                _selectedFiles.Remove(childPath);
+                count++;
+            }
+            else
+            {
+                count += DeselectAllInNode(child, childPath);
+            }
+        }
+        return count;
+    }
 
     /// <summary>
     /// Create a WebTorrent handler for a string torrent source (magnet URI, info hash, URL).
@@ -62,6 +159,15 @@ public class WebTorrentFsHandler : IFsHandler
     /// </summary>
     public Torrent? Torrent => _torrent;
 
+    /// <summary>Get real-time progress (0-1) for a specific file by its relative path.</summary>
+    public double GetFileProgress(string relativePath)
+    {
+        relativePath = relativePath.TrimStart('/');
+        var node = WalkTree(relativePath);
+        if (node?.TorrentFile == null) return 0;
+        return node.TorrentFile.Progress;
+    }
+
     public async Task<bool> EnsureAccessAsync()
     {
         if (IsReady) return true;
@@ -79,39 +185,86 @@ public class WebTorrentFsHandler : IFsHandler
             }
             if (_torrent == null) return false;
 
-            // If the torrent is already ready (e.g. duplicate add with same info hash),
-            // skip WhenReady — the ready event won't fire again
-            if (!_torrent.Ready)
+            // Phase 1 complete: we have a torrent reference.
+            // If already ready (e.g. duplicate add with same info hash), finish immediately.
+            if (_torrent.Ready)
             {
-                await _torrent.WhenReady(30000); // 30s timeout
+                FinishSetup();
+            }
+            else
+            {
+                // Fire-and-forget: wait for the torrent to become ready in the background.
+                // The mount will be created immediately (showing "Connecting..." in the UI),
+                // and when the torrent resolves its metadata, we build the file tree and
+                // raise ContentUpdated so the Library refreshes.
+                _ = WaitForReadyAsync();
             }
 
-            BuildFileTree();
-
-            // Subscribe to download progress to notify VFS consumers when pieces arrive
-            _onDownloadCallback = _ =>
-            {
-                // Throttle notifications to max once per 2 seconds
-                var now = DateTime.UtcNow;
-                if ((now - _lastProgressNotify).TotalSeconds >= 2)
-                {
-                    _lastProgressNotify = now;
-                    RaiseContentUpdated();
-                }
-            };
-            _torrent.OnDownload += _onDownloadCallback;
-
-            // Also fire when torrent completes
-            _onDoneCallback = () => RaiseContentUpdated();
-            _torrent.OnDone += _onDoneCallback;
-
-            return true;
+            return true; // Always succeed if we have a torrent ref
         }
         catch (Exception ex)
         {
             Console.WriteLine($"WebTorrentFsHandler.EnsureAccessAsync failed: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Phase 2: Wait for torrent metadata in the background, then finish setup.
+    /// No timeout — the torrent will eventually resolve or the user can remove it.
+    /// </summary>
+    private async Task WaitForReadyAsync()
+    {
+        try
+        {
+            Console.WriteLine($"WebTorrentFsHandler: waiting for '{DisplayName}' to become ready...");
+            await _torrent!.WhenReady();
+            Console.WriteLine($"WebTorrentFsHandler: '{DisplayName}' is now ready");
+            FinishSetup();
+            // Notify VFS consumers so the Library refreshes with the now-available file tree
+            RaiseContentUpdated();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"WebTorrentFsHandler: WaitForReady failed for '{DisplayName}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Complete handler setup after the torrent is ready: build file tree, deselect all, subscribe events.
+    /// </summary>
+    private void FinishSetup()
+    {
+        if (_torrent == null || _root != null) return; // already finished
+
+        BuildFileTree();
+
+        // Explicitly deselect all files — downloads happen on-demand only.
+        _torrent.DeselectAll();
+
+        // Normalize TorrentSource to the magnet URI for portability
+        var magnetUri = _torrent.MagnetURI;
+        if (!string.IsNullOrEmpty(magnetUri))
+        {
+            TorrentSource = magnetUri;
+        }
+
+        // Subscribe to download progress to notify VFS consumers when pieces arrive
+        _onDownloadCallback = _ =>
+        {
+            // Throttle notifications to max once per 2 seconds
+            var now = DateTime.UtcNow;
+            if ((now - _lastProgressNotify).TotalSeconds >= 2)
+            {
+                _lastProgressNotify = now;
+                RaiseContentUpdated();
+            }
+        };
+        _torrent.OnDownload += _onDownloadCallback;
+
+        // Also fire when torrent completes
+        _onDoneCallback = () => RaiseContentUpdated();
+        _torrent.OnDone += _onDoneCallback;
     }
 
     private void RaiseContentUpdated()
@@ -273,10 +426,20 @@ public class WebTorrentFsHandler : IFsHandler
 
     /// <summary>
     /// Read a byte range from a WebTorrent File as a JS Blob.
-    /// Uses FileReadOptions.StartByte/EndByte (both inclusive).
+    /// Automatically selects the file for download if it isn't already (on-demand).
+    /// Uses FileReadOptions with start/end (both inclusive).
     /// </summary>
-    private static async Task<Blob> ReadRangeBlobAsync(SpawnDev.BlazorJS.WebTorrents.File wtFile, long offset, int length)
+    private async Task<Blob> ReadRangeBlobAsync(SpawnDev.BlazorJS.WebTorrents.File wtFile, long offset, int length)
     {
+        // On-demand: ensure this file is selected for download before reading
+        var relPath = wtFile.Path;
+        if (!_selectedFiles.Contains(relPath))
+        {
+            wtFile.Select();
+            _selectedFiles.Add(relPath);
+            Console.WriteLine($"[WebTorrentFS] Auto-selected for on-demand read: {relPath}");
+        }
+
         var endByte = offset + length - 1;
         if (endByte >= wtFile.Length) endByte = wtFile.Length - 1;
 
@@ -285,7 +448,13 @@ public class WebTorrentFsHandler : IFsHandler
             StartByte = offset,
             EndByte = endByte
         };
-        return await wtFile.Blob(opts);
+        var blob = await wtFile.Blob(opts);
+
+        // Immediately notify so the Library UI reflects progress
+        // (bypasses the 2-second OnDownload throttle for responsive feedback)
+        RaiseContentUpdated();
+
+        return blob;
     }
 
     private static string CombinePath(string basePath, string relative)

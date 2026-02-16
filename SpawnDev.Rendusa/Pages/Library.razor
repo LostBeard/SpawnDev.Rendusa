@@ -8,7 +8,7 @@
 @inject VfsServiceWorkerBridge VfsBridge
 @inject WebTorrentManagerService WtManager
 @inject SettingsService Settings
-@inject IJSRuntime JS
+@inject BlazorJSRuntime JS
 @implements IDisposable
 @using SpawnDev.Rendusa.VirtualFS
 @using SpawnDev.Rendusa.VirtualFS.Handlers
@@ -100,7 +100,7 @@
                 {
                     <div class="media-card folder-card"
                          @onclick="@(() => NavigateTo(node.Path))"
-                         @oncontextmenu="@(e => OpenContextMenu(e, node))" @oncontextmenu:preventDefault="true"
+                         @oncontextmenu="@(e => OpenContextMenu(e, node))" @oncontextmenu:preventDefault="true" @oncontextmenu:stopPropagation="true"
                          @ontouchstart="@(e => OnTouchStart(e, node))" @ontouchend="OnTouchEnd" @ontouchmove="OnTouchEnd">
                         <div class="thumbnail">
                             <span>📂</span>
@@ -118,7 +118,11 @@
                                     <span class="badge badge-readonly">Read-Only</span>
                                 }
                             </div>
-                            @if (node.Metadata?.Progress is double fp && fp < 1.0)
+                            @if (node.Handler is WebTorrentFsHandler wtFolder)
+                            {
+                                @((MarkupString)GetTorrentFolderStatusHtml(wtFolder, node))
+                            }
+                            else if (node.Metadata?.Progress is double fp && fp < 1.0)
                             {
                                 <div class="progress-bar-container">
                                     <div class="progress-bar-fill" style="width:@($"{fp * 100:F1}%")"></div>
@@ -132,7 +136,7 @@
                 {
                     <div class="media-card"
                          @onclick="@(() => OnFileClick(file))"
-                         @oncontextmenu="@(e => OpenContextMenu(e, file))" @oncontextmenu:preventDefault="true"
+                         @oncontextmenu="@(e => OpenContextMenu(e, file))" @oncontextmenu:preventDefault="true" @oncontextmenu:stopPropagation="true"
                          @ontouchstart="@(e => OnTouchStart(e, file))" @ontouchend="OnTouchEnd" @ontouchmove="OnTouchEnd">
                         <div class="thumbnail">
                             @if (file.MimeType?.StartsWith("image/") == true)
@@ -152,7 +156,11 @@
                                 <span class="badge @GetBadgeClass(file)">@GetMediaTypeLabel(file)</span>
                                 <span>@FormatSize(file.Size)</span>
                             </div>
-                            @if (file.Metadata?.Progress is double prg && prg < 1.0)
+                            @if (file.Handler is WebTorrentFsHandler wtFile)
+                            {
+                                @((MarkupString)GetTorrentFileStatusHtml(wtFile, file))
+                            }
+                            else if (file.Metadata?.Progress is double prg && prg < 1.0)
                             {
                                 <div class="progress-bar-container">
                                     <div class="progress-bar-fill" style="width:@($"{prg * 100:F1}%")"></div>
@@ -180,10 +188,10 @@
                     <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); ShowNewPlaylistPrompt(); })">🎵 New Playlist</button>
                     <div class="ctx-divider"></div>
                 }
-                <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); AddFiles(); })">➕ Import Files</button>
+                <button class="ctx-item" @onclick="@(async () => { CloseContextMenu(); await AddFiles(); })">➕ Import Files</button>
                 @if (IsLocalHandler())
                 {
-                    <button class="ctx-item" @onclick="@(() => { CloseContextMenu(); AddFolder(); })">📂 Link Folder</button>
+                    <button class="ctx-item" @onclick="@(async () => { CloseContextMenu(); await AddFolder(); })">📂 Link Folder</button>
                 }
                 @if (Settings.Settings.WebTorrentEnabled && MediaLibrary.VFS.IsWritable(CurrentPath))
                 {
@@ -193,19 +201,31 @@
             else if (_contextMenuNode.NodeType == VfsNodeType.Directory)
             {
                 @* Folder context menu *@
-                <button class="ctx-item" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); NavigateTo(n.Path); })">📂 Open</button>
+                <button class="ctx-item" @onclick="@(async () => { var n = _contextMenuNode; CloseContextMenu(); await NavigateTo(n.Path); })">📂 Open</button>
+                <button class="ctx-item" @onclick="@(async () => { var n = _contextMenuNode; CloseContextMenu(); await PlayAllInDirectory(n); })">▶ Play All</button>
                 @if (IsRenamable(_contextMenuNode))
                 {
                     <button class="ctx-item" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); ShowRenamePrompt(n); })">✏ Rename</button>
                 }
                 @if (IsUnlinkable(_contextMenuNode))
                 {
-                    <button class="ctx-item" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); _ = UnlinkFolder(n); })">🔗 Unlink</button>
+                    <button class="ctx-item" @onclick="@(async () => { var n = _contextMenuNode; CloseContextMenu(); await UnlinkFolder(n); })">🔗 Unlink</button>
                 }
-                @if (IsDeletable(_contextMenuNode))
+                @if (_contextMenuNode.Handler is WebTorrentFsHandler wtFolderHandler)
                 {
                     <div class="ctx-divider"></div>
-                    <button class="ctx-item ctx-danger" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); _ = DeleteNode(n); })">🗑 Delete</button>
+                    @if (wtFolderHandler.HasSelectedFilesInDirectory(GetTorrentRelativePath(_contextMenuNode.Path, wtFolderHandler)))
+                    {
+                        <button class="ctx-item" @onclick="@(() => { var h = wtFolderHandler; var rp = GetTorrentRelativePath(_contextMenuNode!.Path, h); CloseContextMenu(); h.DeselectDirectory(rp); StateHasChanged(); })">⏸ Pause All</button>
+                    }
+                    <button class="ctx-item" @onclick="@(() => { var h = wtFolderHandler; var rp = GetTorrentRelativePath(_contextMenuNode!.Path, h); CloseContextMenu(); h.SelectDirectory(rp); StateHasChanged(); })">⬇️ Download All</button>
+                    <div class="ctx-divider"></div>
+                    <button class="ctx-item ctx-danger" @onclick="@(async () => { var n = _contextMenuNode; CloseContextMenu(); await DeleteNode(n); })">🧲 Remove Torrent</button>
+                }
+                else if (IsDeletable(_contextMenuNode))
+                {
+                    <div class="ctx-divider"></div>
+                    <button class="ctx-item ctx-danger" @onclick="@(async () => { var n = _contextMenuNode; CloseContextMenu(); await DeleteNode(n); })">🗑 Delete</button>
                 }
             }
             else if (_contextMenuNode is IVfsFile ctxFile)
@@ -223,10 +243,22 @@
                 {
                     <button class="ctx-item" @onclick="@(() => { var f = (IVfsFile)_contextMenuNode!; CloseContextMenu(); ShowAddToPlaylistPicker(f); })">🎵 Add to Playlist</button>
                 }
-                @if (IsDeletable(_contextMenuNode))
+                @if (_contextMenuNode.Handler is WebTorrentFsHandler wtFileHandler)
                 {
                     <div class="ctx-divider"></div>
-                    <button class="ctx-item ctx-danger" @onclick="@(() => { var n = _contextMenuNode; CloseContextMenu(); _ = DeleteNode(n); })">🗑 Delete</button>
+                    @if (wtFileHandler.IsFileSelected(GetTorrentRelativePath(_contextMenuNode.Path, wtFileHandler)))
+                    {
+                        <button class="ctx-item" @onclick="@(() => { var h = wtFileHandler; var rp = GetTorrentRelativePath(_contextMenuNode!.Path, h); CloseContextMenu(); h.DeselectFile(rp); StateHasChanged(); })">⏸ Pause Download</button>
+                    }
+                    else
+                    {
+                        <button class="ctx-item" @onclick="@(() => { var h = wtFileHandler; var rp = GetTorrentRelativePath(_contextMenuNode!.Path, h); CloseContextMenu(); h.SelectFile(rp); StateHasChanged(); })">⬇️ Download</button>
+                    }
+                }
+                else if (IsDeletable(_contextMenuNode))
+                {
+                    <div class="ctx-divider"></div>
+                    <button class="ctx-item ctx-danger" @onclick="@(async () => { var n = _contextMenuNode; CloseContextMenu(); await DeleteNode(n); })">🗑 Delete</button>
                 }
             }
         </div>
@@ -461,14 +493,14 @@
         await LoadCurrentPath();
     }
 
-    protected override async Task OnAfterRenderAsync(bool firstRender)
+    protected override void OnAfterRender(bool firstRender)
     {
         if (_shouldRestoreScroll)
         {
             _shouldRestoreScroll = false;
             try
             {
-                await JS.InvokeVoidAsync("eval",
+                JS.CallVoid("eval",
                     $"document.querySelector('.library-page')?.scrollTo(0, {_savedScrollTop})");
             }
             catch { /* component may have been disposed */ }
@@ -481,11 +513,12 @@
         await InvokeAsync(StateHasChanged);
     }
 
-    /// <summary>Only refresh when VFS content changes under the currently viewed path.</summary>
+    /// <summary>Refresh when VFS content changes affect the currently viewed path.</summary>
     private void OnVfsContentChanged(VfsChangeEventArgs args)
     {
-        // Check if the changed path is under the current directory
-        if (args.Path.StartsWith(CurrentPath, StringComparison.OrdinalIgnoreCase))
+        // Refresh if: the changed path is under us, OR we are inside the changed subtree
+        if (args.Path.StartsWith(CurrentPath, StringComparison.OrdinalIgnoreCase)
+            || CurrentPath.StartsWith(args.Path, StringComparison.OrdinalIgnoreCase))
         {
             Refresh();
         }
@@ -499,9 +532,13 @@
             var nodes = await MediaLibrary.VFS.ListDirectoryAsync(CurrentPath);
 
             CurrentNodes = nodes
+                .Where(n => n is not IVfsFile f || !f.Name.EndsWith(".mount", StringComparison.OrdinalIgnoreCase))
                 .OrderBy(n => n.NodeType == VfsNodeType.File ? 1 : 0) // directories first
                 .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+            // Auto-select image files in torrent folders so thumbnails load on-demand
+            AutoSelectTorrentImages();
         }
         catch (Exception ex)
         {
@@ -511,12 +548,132 @@
         IsLoading = false;
     }
 
+    /// <summary>When browsing inside a torrent folder, select image files so thumbnails fetch on demand.</summary>
+    private void AutoSelectTorrentImages()
+    {
+        foreach (var node in CurrentNodes)
+        {
+            if (node is IVfsFile file && node.Handler is WebTorrentFsHandler wtHandler)
+            {
+                if (file.MimeType?.StartsWith("image/") == true)
+                {
+                    var relPath = GetTorrentRelativePath(file.Path, wtHandler);
+                    if (!wtHandler.IsFileSelected(relPath))
+                    {
+                        wtHandler.SelectFile(relPath);
+                    }
+                }
+            }
+        }
+    }
 
-    // === Navigation ===
+    /// <summary>Get the relative path of a VFS path within a torrent handler's mount.</summary>
+    private static string GetTorrentRelativePath(string vfsPath, WebTorrentFsHandler handler)
+    {
+        var mountPath = handler.GetMountPath();
+        if (vfsPath.StartsWith(mountPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return vfsPath.Substring(mountPath.Length).TrimStart('/');
+        }
+        return vfsPath.TrimStart('/');
+    }
+
+    /// <summary>Render torrent file status: progress bar + state badge.</summary>
+    private string GetTorrentFileStatusHtml(WebTorrentFsHandler handler, IVfsFile file)
+    {
+        var relPath = GetTorrentRelativePath(file.Path, handler);
+        var progress = handler.GetFileProgress(relPath);
+        var isSelected = handler.IsFileSelected(relPath);
+
+        var sb = new System.Text.StringBuilder();
+
+        // Progress bar — always shown for torrent files
+        var pct = progress * 100;
+        var barColor = progress >= 1.0 ? "var(--accent-green, #4caf50)" : isSelected ? "var(--accent, #ff6d00)" : "var(--text-muted, #888)";
+        sb.Append($"<div class=\"progress-bar-container\"><div class=\"progress-bar-fill\" style=\"width:{pct:F1}%;background:{barColor}\"></div></div>");
+
+        // Status line: badge + percentage
+        if (progress >= 1.0)
+        {
+            sb.Append("<div class=\"torrent-status-line\"><span class=\"badge badge-complete\">✅ Complete</span></div>");
+        }
+        else if (isSelected)
+        {
+            sb.Append($"<div class=\"torrent-status-line\"><span class=\"badge badge-downloading\">⬇️ {pct:F0}%</span></div>");
+        }
+        else
+        {
+            sb.Append($"<div class=\"torrent-status-line\"><span class=\"badge badge-paused\">⏸ Paused</span>");
+            if (progress > 0)
+                sb.Append($" <span class=\"progress-label\">{pct:F0}%</span>");
+            sb.Append("</div>");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>Render torrent folder status: overall progress, peer count, speed.</summary>
+    private string GetTorrentFolderStatusHtml(WebTorrentFsHandler handler, IVfsNode node)
+    {
+        var torrent = handler.Torrent;
+
+        // Not yet initialized at all
+        if (torrent == null)
+            return "<div class=\"torrent-status-line\"><span class=\"badge badge-stalled\">⏳ Initializing…</span></div>";
+
+        // Torrent exists but metadata not yet received (still connecting to trackers/peers)
+        if (!handler.IsReady)
+            return "<div class=\"torrent-status-line\"><span class=\"badge badge-stalled\">🔗 Connecting…</span></div>";
+
+        var sb = new System.Text.StringBuilder();
+
+        // Progress bar
+        var progress = torrent.Progress;
+        var pct = progress * 100;
+        var barColor = progress >= 1.0 ? "var(--accent-green, #4caf50)" : "var(--accent, #ff6d00)";
+        sb.Append($"<div class=\"progress-bar-container\"><div class=\"progress-bar-fill\" style=\"width:{pct:F1}%;background:{barColor}\"></div></div>");
+
+        // Status line: state badge + peers + speed
+        sb.Append("<div class=\"torrent-status-line\">");
+        if (progress >= 1.0)
+        {
+            sb.Append("<span class=\"badge badge-complete\">✅ Complete</span>");
+        }
+        else if (torrent.Paused)
+        {
+            sb.Append($"<span class=\"badge badge-paused\">⏸ Paused</span> <span class=\"progress-label\">{pct:F0}%</span>");
+        }
+        else
+        {
+            var speed = torrent.DownloadSpeed;
+            if (speed > 0)
+                sb.Append($"<span class=\"badge badge-downloading\">⬇️ {pct:F0}%</span> <span class=\"torrent-speed\">{FormatSpeed(speed)}</span>");
+            else
+                sb.Append($"<span class=\"badge badge-stalled\">⏳ {pct:F0}%</span>");
+        }
+
+        // Peer count
+        var peers = torrent.NumPeers;
+        if (peers > 0)
+            sb.Append($" <span class=\"torrent-peers\">{peers} peer{(peers != 1 ? "s" : "")}</span>");
+        else
+            sb.Append(" <span class=\"torrent-peers torrent-peers-zero\">0 peers</span>");
+
+        sb.Append("</div>");
+        return sb.ToString();
+    }
+
+    private static string FormatSpeed(double bytesPerSec)
+    {
+        if (bytesPerSec >= 1048576) return $"{bytesPerSec / 1048576:F1} MB/s";
+        if (bytesPerSec >= 1024) return $"{bytesPerSec / 1024:F0} KB/s";
+        return $"{bytesPerSec:F0} B/s";
+    }
+
 
     private async Task NavigateTo(string path)
     {
-        await SaveScrollPosition();
+        SaveScrollPosition();
         CurrentPath = path;
         await LoadCurrentPath();
     }
@@ -749,8 +906,8 @@
                 Type = MediaLibraryService.DetectMediaType(file.MimeType)
             };
 
-            // Collect all playable files in current directory as a playlist
-            var playableFiles = CurrentNodes.OfType<IVfsFile>().ToList();
+            // Collect all playable media files in current directory as a playlist
+            var playableFiles = CurrentNodes.OfType<IVfsFile>().Where(f => IsMediaFile(f)).ToList();
             var items = playableFiles.Select(f => new MediaItem
             {
                 Title = f.Name,
@@ -778,6 +935,42 @@
         StateHasChanged();
         await Task.Delay(3000);
         StatusMessage = null;
+    }
+
+    private async Task PlayAllInDirectory(IVfsNode dirNode)
+    {
+        try
+        {
+            var nodes = await MediaLibrary.VFS.ListDirectoryAsync(dirNode.Path);
+            var mediaFiles = nodes.OfType<IVfsFile>().Where(f => IsMediaFile(f)).ToList();
+            if (mediaFiles.Count == 0)
+            {
+                StatusMessage = "No media files found in this folder.";
+                StateHasChanged();
+                await Task.Delay(2000);
+                StatusMessage = null;
+                return;
+            }
+
+            var items = mediaFiles.Select(f => new MediaItem
+            {
+                Title = f.Name,
+                SourceUri = "/vfs" + f.Path,
+                MimeType = f.MimeType,
+                Type = MediaLibraryService.DetectMediaType(f.MimeType)
+            }).ToList();
+
+            NowPlaying.SetItems(items, items[0].Id);
+            Navigation.NavigateTo("/player?fromFolder=true");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PlayAllInDirectory error: {ex.Message}");
+            StatusMessage = "Error playing folder contents.";
+            StateHasChanged();
+            await Task.Delay(2000);
+            StatusMessage = null;
+        }
     }
 
     private async Task UnlinkFolder(IVfsNode node)
@@ -826,6 +1019,7 @@
             Console.WriteLine($"ConfirmNewFolder error: {ex.Message}");
             StatusMessage = "Error creating folder.";
         }
+        await LoadCurrentPath();
         StateHasChanged();
         await Task.Delay(2000);
         StatusMessage = null;
@@ -843,10 +1037,24 @@
                 await UnlinkFolder(node);
                 return;
             }
-            else if (node.Handler is WebTorrentFsHandler wtHandler && wtHandler.TorrentSource != null)
+            else if (node.Handler is WebTorrentFsHandler wtHandler)
             {
-                await WtManager.RemoveTorrentAsync(wtHandler.TorrentSource);
-                StatusMessage = $"Removed torrent \"{node.Name}\"";
+                var name = node.Name;
+                try
+                {
+                    await WtManager.RemoveTorrentAsync(wtHandler.TorrentSource ?? wtHandler.DisplayName);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"RemoveTorrentAsync warning: {ex.Message}");
+                    // The torrent may still have been removed successfully — continue
+                }
+                StatusMessage = $"Removed torrent \"{name}\"";
+                await LoadCurrentPath();
+                StateHasChanged();
+                await Task.Delay(2000);
+                StatusMessage = null;
+                return;
             }
             else
             {
@@ -860,6 +1068,7 @@
             Console.WriteLine($"DeleteNode error: {ex.Message}");
             StatusMessage = "Error deleting item.";
         }
+        await LoadCurrentPath();
         StateHasChanged();
         await Task.Delay(2000);
         StatusMessage = null;
@@ -927,6 +1136,7 @@
             Console.WriteLine($"ConfirmRename error: {ex.Message}");
             StatusMessage = "Error renaming item.";
         }
+        await LoadCurrentPath();
         StateHasChanged();
         await Task.Delay(2000);
         StatusMessage = null;
@@ -990,11 +1200,11 @@
         return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
     }
 
-    private async Task SaveScrollPosition()
+    private void SaveScrollPosition()
     {
         try
         {
-            _savedScrollTop = await JS.InvokeAsync<double>("eval",
+            _savedScrollTop = JS.Call<double>("eval",
                 "document.querySelector('.library-page')?.scrollTop ?? 0");
         }
         catch { /* ignore if DOM not ready */ }
@@ -1165,7 +1375,15 @@
 
             if (items.Count > 0)
             {
-                PlayFile(items[0]);
+                var mediaItems = items.Select(f => new MediaItem
+                {
+                    Title = f.Name,
+                    SourceUri = "/vfs" + f.Path,
+                    MimeType = f.MimeType,
+                    Type = MediaLibraryService.DetectMediaType(f.MimeType)
+                }).ToList();
+                NowPlaying.SetItems(mediaItems, mediaItems[0].Id);
+                Navigation.NavigateTo("/player?fromFolder=true");
                 StatusMessage = $"Playing playlist \"{file.Name}\" ({items.Count} items)";
                 StateHasChanged();
                 await Task.Delay(2000);
@@ -1252,7 +1470,7 @@
 
     public void Dispose()
     {
-        _ = SaveScrollPosition();
+        SaveScrollPosition();
         _longPressTimer?.Dispose();
         MediaLibrary.OnChanged -= Refresh;
         MediaLibrary.VFS.OnMountsChanged -= Refresh;

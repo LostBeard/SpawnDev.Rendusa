@@ -1,0 +1,637 @@
+@page "/vfstest"
+@inject MediaLibraryService MediaLibrary
+@inject VfsServiceWorkerBridge VfsBridge
+@inject BlazorJSRuntime JS
+@using SpawnDev.Rendusa.VirtualFS
+@using SpawnDev.Rendusa.VirtualFS.Handlers
+
+<PageTitle>Rendusa — VFS Tests</PageTitle>
+
+<div class="settings-page p-2 animate-fade">
+    <div class="page-header">
+        <h2>🧪 VFS Tests</h2>
+        <div class="actions" style="display:flex; gap:0.5rem;">
+            <button class="btn btn-primary" @onclick="RunAllTests" disabled="@IsRunning">
+                @(IsRunning ? "⏳ Running…" : "▶ Run All")
+            </button>
+            <button class="btn" @onclick="ClearResults" disabled="@IsRunning">
+                🗑 Clear
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(StatusMessage))
+    {
+        <div class="status-bar" style="padding:0.4rem 0.8rem; background:var(--accent-glow); color:var(--accent); border-radius:var(--radius-sm); margin:0.5rem 0; font-size:0.85rem;">
+            @StatusMessage
+        </div>
+    }
+
+    @* === Test Groups === *@
+    @foreach (var group in TestGroups)
+    {
+        <div class="settings-group">
+            <div class="settings-group-header" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>@group.Icon @group.Name</span>
+                <div style="display:flex; gap:0.5rem; align-items:center;">
+                    @if (group.Results.Count > 0)
+                    {
+                        var passed = group.Results.Count(r => r.Passed);
+                        var total = group.Results.Count;
+                        <span style="font-size:0.8rem; color:@(passed == total ? "var(--accent-green, #4caf50)" : "var(--accent-red, #f44336)");">
+                            @passed/@total
+                        </span>
+                    }
+                    <button class="btn btn-sm" @onclick="@(() => RunGroup(group))" disabled="@IsRunning"
+                            style="font-size:0.75rem; padding:0.2rem 0.5rem;">
+                        ▶ Run
+                    </button>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrEmpty(group.Description))
+            {
+                <div style="padding:0.3rem 0.75rem; color:var(--text-muted); font-size:0.8rem;">
+                    @group.Description
+                </div>
+            }
+
+            @foreach (var result in group.Results)
+            {
+                <div class="settings-item" style="padding:0.4rem 0.75rem;">
+                    <div style="display:flex; align-items:center; gap:0.5rem; flex:1;">
+                        <span style="font-size:0.9rem;">@(result.Passed ? "✅" : "❌")</span>
+                        <span style="font-size:0.85rem; color:var(--text-primary);">@result.Name</span>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:0.75rem;">
+                        @if (!string.IsNullOrEmpty(result.Detail))
+                        {
+                            <span style="font-size:0.75rem; color:var(--text-muted); max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                  title="@result.Detail">
+                                @result.Detail
+                            </span>
+                        }
+                        <span style="font-size:0.75rem; color:var(--text-muted); min-width:45px; text-align:right;">
+                            @result.ElapsedMs ms
+                        </span>
+                    </div>
+                </div>
+            }
+
+            @if (group.Results.Count == 0 && !IsRunning)
+            {
+                <div style="padding:0.5rem 0.75rem; color:var(--text-muted); font-size:0.8rem; font-style:italic;">
+                    No results yet — click Run to test
+                </div>
+            }
+        </div>
+    }
+
+    @* === Summary === *@
+    @if (TestGroups.Any(g => g.Results.Count > 0))
+    {
+        var totalPassed = TestGroups.Sum(g => g.Results.Count(r => r.Passed));
+        var totalTests = TestGroups.Sum(g => g.Results.Count);
+        var allPassed = totalPassed == totalTests;
+        <div class="settings-group" style="border-color:@(allPassed ? "var(--accent-green, #4caf50)" : "var(--accent-red, #f44336)");">
+            <div class="settings-group-header" style="color:@(allPassed ? "var(--accent-green, #4caf50)" : "var(--accent-red, #f44336)");">
+                @(allPassed ? "✅" : "❌") Summary: @totalPassed/@totalTests passed
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private bool IsRunning;
+    private string? StatusMessage;
+    private List<TestGroup> TestGroups = new();
+
+    protected override void OnInitialized()
+    {
+        BuildTestGroups();
+    }
+
+    private void BuildTestGroups()
+    {
+        TestGroups = new List<TestGroup>
+        {
+            new TestGroup
+            {
+                Name = "OPFS Handler (writable)",
+                Icon = "📂",
+                Description = "Tests file/directory CRUD operations on the root OPFS handler.",
+                RunTests = RunOpfsTests
+            },
+            new TestGroup
+            {
+                Name = "VFS Read/Write via VirtualFileSystem",
+                Icon = "🗄",
+                Description = "Tests high-level VFS API: WriteText, ReadText, WriteFile, ReadRange.",
+                RunTests = RunVfsApiTests
+            },
+            new TestGroup
+            {
+                Name = "Service Worker Streaming",
+                Icon = "🌐",
+                Description = "Tests /vfs/ URL fetching via the service worker bridge.",
+                RunTests = RunServiceWorkerTests
+            },
+        };
+
+        // Add read-only handler groups dynamically
+        var mounts = MediaLibrary.VFS.GetMounts();
+        foreach (var mount in mounts)
+        {
+            if (mount.Handler is WebTorrentFsHandler wt)
+            {
+                TestGroups.Add(new TestGroup
+                {
+                    Name = $"WebTorrent: {wt.DisplayName}",
+                    Icon = "🧲",
+                    Description = $"Read-only tests on mounted torrent at {mount.MountPath}.",
+                    RunTests = () => RunReadOnlyHandlerTests(mount.MountPath, mount.Handler)
+                });
+            }
+            else if (mount.Handler is FileSystemAccessFsHandler fsa)
+            {
+                TestGroups.Add(new TestGroup
+                {
+                    Name = $"FileSystemAccess: {fsa.DisplayName}",
+                    Icon = "📁",
+                    Description = $"Read-only tests on linked folder at {mount.MountPath}.",
+                    RunTests = () => RunReadOnlyHandlerTests(mount.MountPath, mount.Handler)
+                });
+            }
+        }
+    }
+
+    private async Task RunAllTests()
+    {
+        IsRunning = true;
+        StatusMessage = "Running all tests…";
+        StateHasChanged();
+
+        // Rebuild groups to pick up any new mounts
+        BuildTestGroups();
+
+        foreach (var group in TestGroups)
+        {
+            StatusMessage = $"Running: {group.Name}…";
+            StateHasChanged();
+            await RunGroup(group, skipUiUpdate: true);
+        }
+
+        var totalPassed = TestGroups.Sum(g => g.Results.Count(r => r.Passed));
+        var totalTests = TestGroups.Sum(g => g.Results.Count);
+        StatusMessage = $"Done: {totalPassed}/{totalTests} passed";
+        IsRunning = false;
+        StateHasChanged();
+
+        await Task.Delay(5000);
+        StatusMessage = null;
+        StateHasChanged();
+    }
+
+    private async Task RunGroup(TestGroup group, bool skipUiUpdate = false)
+    {
+        if (!skipUiUpdate)
+        {
+            IsRunning = true;
+            StatusMessage = $"Running: {group.Name}…";
+            StateHasChanged();
+        }
+
+        group.Results.Clear();
+
+        try
+        {
+            await group.RunTests();
+        }
+        catch (Exception ex)
+        {
+            group.Results.Add(new TestResult
+            {
+                Name = "Unhandled error",
+                Passed = false,
+                Detail = ex.Message,
+                ElapsedMs = 0
+            });
+        }
+
+        if (!skipUiUpdate)
+        {
+            IsRunning = false;
+            StatusMessage = null;
+            StateHasChanged();
+        }
+    }
+
+    // ==========================================
+    // OPFS Handler Tests
+    // ==========================================
+
+    private async Task RunOpfsTests()
+    {
+        var vfs = MediaLibrary.VFS;
+        const string testDir = "/__vfstest__";
+        const string subDir = "/__vfstest__/sub";
+        const string textFile = "/__vfstest__/hello.txt";
+        const string renamedFile = "/__vfstest__/renamed.txt";
+        var group = TestGroups.First(g => g.Name.Contains("OPFS"));
+
+        // Cleanup first in case previous run left artifacts
+        try { await vfs.DeleteAsync(testDir, recursive: true); } catch { }
+
+        // 1. Create Directory
+        await RunTest(group, "Create Directory", async () =>
+        {
+            await vfs.CreateDirectoryAsync(testDir);
+            var exists = await vfs.ExistsAsync(testDir);
+            if (!exists) throw new Exception("Directory not found after creation");
+            return "Created " + testDir;
+        });
+
+        // 2. Create Sub-Directory
+        await RunTest(group, "Create Sub-Directory", async () =>
+        {
+            await vfs.CreateDirectoryAsync(subDir);
+            var exists = await vfs.ExistsAsync(subDir);
+            if (!exists) throw new Exception("Sub-directory not found after creation");
+            return "Created " + subDir;
+        });
+
+        // 3. Write Text File
+        await RunTest(group, "Write Text File", async () =>
+        {
+            await vfs.WriteTextAsync(textFile, "Hello VFS!");
+            var exists = await vfs.ExistsAsync(textFile);
+            if (!exists) throw new Exception("File not found after write");
+            return "Wrote 10 chars";
+        });
+
+        // 4. Read Text File
+        await RunTest(group, "Read Text File", async () =>
+        {
+            var content = await vfs.ReadTextAsync(textFile);
+            if (content != "Hello VFS!")
+                throw new Exception($"Expected 'Hello VFS!', got '{content}'");
+            return $"Content: \"{content}\"";
+        });
+
+        // 5. Write Binary (Blob)
+        await RunTest(group, "Write Binary File", async () =>
+        {
+            var bytes = new byte[1024];
+            for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(i % 256);
+            using var blob = new Blob(new[] { bytes });
+            await vfs.WriteFileAsync("/__vfstest__/binary.dat", blob);
+            var node = await vfs.ResolveAsync("/__vfstest__/binary.dat");
+            if (node is not IVfsFile f) throw new Exception("Written file not resolved as IVfsFile");
+            if (f.Size != 1024) throw new Exception($"Expected size 1024, got {f.Size}");
+            return $"Wrote 1024 bytes, size={f.Size}";
+        });
+
+        // 6. Read Range (byte[])
+        await RunTest(group, "Read Range (bytes)", async () =>
+        {
+            var data = await vfs.ReadRangeAsync("/__vfstest__/binary.dat", 0, 10);
+            if (data.Length != 10) throw new Exception($"Expected 10 bytes, got {data.Length}");
+            if (data[0] != 0 || data[9] != 9)
+                throw new Exception($"Byte mismatch: [0]={data[0]}, [9]={data[9]}");
+            return $"Read 10 bytes: [{string.Join(",", data.Take(5))}...]";
+        });
+
+        // 7. Read Range (Blob)
+        await RunTest(group, "Read Range (Blob)", async () =>
+        {
+            var node = await vfs.ResolveAsync("/__vfstest__/binary.dat");
+            if (node is not IVfsFile f) throw new Exception("File not resolved");
+            using var blob = await f.ReadRangeBlobAsync(100, 50);
+            if (blob.Size != 50) throw new Exception($"Expected blob size 50, got {blob.Size}");
+            return $"Blob size={blob.Size}";
+        });
+
+        // 8. List Directory
+        await RunTest(group, "List Directory", async () =>
+        {
+            var nodes = await vfs.ListDirectoryAsync(testDir);
+            var names = nodes.Select(n => n.Name).OrderBy(n => n).ToList();
+            if (names.Count < 3)
+                throw new Exception($"Expected ≥3 items, got {names.Count}: [{string.Join(", ", names)}]");
+            return $"{names.Count} items: [{string.Join(", ", names)}]";
+        });
+
+        // 9. Rename
+        await RunTest(group, "Rename File", async () =>
+        {
+            await vfs.RenameAsync(textFile, "renamed.txt");
+            var oldExists = await vfs.ExistsAsync(textFile);
+            var newExists = await vfs.ExistsAsync(renamedFile);
+            if (oldExists) throw new Exception("Old path still exists after rename");
+            if (!newExists) throw new Exception("New path not found after rename");
+            return "hello.txt → renamed.txt";
+        });
+
+        // 10. Delete File
+        await RunTest(group, "Delete File", async () =>
+        {
+            await vfs.DeleteAsync(renamedFile);
+            var exists = await vfs.ExistsAsync(renamedFile);
+            if (exists) throw new Exception("File still exists after delete");
+            return "Deleted renamed.txt";
+        });
+
+        // 11. Delete Directory (recursive)
+        await RunTest(group, "Delete Directory (recursive)", async () =>
+        {
+            await vfs.DeleteAsync(testDir, recursive: true);
+            var exists = await vfs.ExistsAsync(testDir);
+            if (exists) throw new Exception("Directory still exists after recursive delete");
+            return "Cleaned up " + testDir;
+        });
+
+        StateHasChanged();
+    }
+
+    // ==========================================
+    // VFS API Tests (higher-level)
+    // ==========================================
+
+    private async Task RunVfsApiTests()
+    {
+        var vfs = MediaLibrary.VFS;
+        const string testDir = "/__vfstest_api__";
+        var group = TestGroups.First(g => g.Name.Contains("VFS"));
+
+        // Cleanup first
+        try { await vfs.DeleteAsync(testDir, recursive: true); } catch { }
+
+        // 1. WriteText + ReadText roundtrip
+        await RunTest(group, "WriteText + ReadText roundtrip", async () =>
+        {
+            await vfs.CreateDirectoryAsync(testDir);
+            var text = "The quick brown fox jumps over the lazy dog. 🦊";
+            await vfs.WriteTextAsync($"{testDir}/roundtrip.txt", text);
+            var read = await vfs.ReadTextAsync($"{testDir}/roundtrip.txt");
+            if (read != text) throw new Exception($"Mismatch: expected '{text}', got '{read}'");
+            return $"Roundtrip OK ({text.Length} chars)";
+        });
+
+        // 2. WriteFile + ReadRange roundtrip with larger data
+        await RunTest(group, "WriteFile + ReadRange roundtrip (64KB)", async () =>
+        {
+            var data = new byte[65536];
+            new Random(42).NextBytes(data);
+            using var blob = new Blob(new[] { data });
+            await vfs.WriteFileAsync($"{testDir}/large.bin", blob);
+
+            // Read middle chunk
+            var chunk = await vfs.ReadRangeAsync($"{testDir}/large.bin", 32768, 1024);
+            if (chunk.Length != 1024) throw new Exception($"Expected 1024, got {chunk.Length}");
+
+            // Verify content matches
+            for (int i = 0; i < chunk.Length; i++)
+            {
+                if (chunk[i] != data[32768 + i])
+                    throw new Exception($"Mismatch at offset {32768 + i}: expected {data[32768 + i]}, got {chunk[i]}");
+            }
+            return "64KB write + 1KB range read verified";
+        });
+
+        // 3. ResolveAsync returns correct node type
+        await RunTest(group, "ResolveAsync node types", async () =>
+        {
+            var dirNode = await vfs.ResolveAsync(testDir);
+            if (dirNode == null) throw new Exception("Directory not resolved");
+            if (dirNode.NodeType != VfsNodeType.Directory)
+                throw new Exception($"Expected Directory, got {dirNode.NodeType}");
+
+            var fileNode = await vfs.ResolveAsync($"{testDir}/roundtrip.txt");
+            if (fileNode == null) throw new Exception("File not resolved");
+            if (fileNode is not IVfsFile fileInfo)
+                throw new Exception("File node does not implement IVfsFile");
+            if (fileInfo.Size <= 0)
+                throw new Exception($"Expected size > 0, got {fileInfo.Size}");
+            return $"Dir: {dirNode.NodeType}, File: {fileNode.NodeType} (size={fileInfo.Size})";
+        });
+
+        // 4. ExistsAsync correctness
+        await RunTest(group, "ExistsAsync correctness", async () =>
+        {
+            var exists = await vfs.ExistsAsync($"{testDir}/roundtrip.txt");
+            if (!exists) throw new Exception("Expected existing file to return true");
+            var notExists = await vfs.ExistsAsync($"{testDir}/nonexistent.xyz");
+            if (notExists) throw new Exception("Expected non-existent file to return false");
+            return "Exists=true for real file, false for fake";
+        });
+
+        // 5. IsWritable check
+        await RunTest(group, "IsWritable check", async () =>
+        {
+            var writable = vfs.IsWritable(testDir);
+            if (!writable) throw new Exception("Expected OPFS path to be writable");
+            return $"IsWritable(\"{testDir}\") = {writable}";
+        });
+
+        // Cleanup
+        try { await vfs.DeleteAsync(testDir, recursive: true); } catch { }
+
+        StateHasChanged();
+    }
+
+    // ==========================================
+    // Service Worker Streaming Tests
+    // ==========================================
+
+    private async Task RunServiceWorkerTests()
+    {
+        var vfs = MediaLibrary.VFS;
+        const string testDir = "/__vfstest_sw__";
+        var group = TestGroups.First(g => g.Name.Contains("Service Worker"));
+
+        // Cleanup first
+        try { await vfs.DeleteAsync(testDir, recursive: true); } catch { }
+
+        // Write a test file for streaming
+        await vfs.CreateDirectoryAsync(testDir);
+        var testData = new byte[4096];
+        new Random(99).NextBytes(testData);
+        using var blob = new Blob(new[] { testData }, new BlobOptions { Type = "application/octet-stream" });
+        await vfs.WriteFileAsync($"{testDir}/stream-test.bin", blob);
+
+        // 1. Fetch full file via /vfs/ URL
+        await RunTest(group, "Fetch /vfs/ URL (full)", async () =>
+        {
+            using var response = await JS.CallAsync<Response>("fetch", "/vfs/__vfstest_sw__/stream-test.bin");
+            var status = response.Status;
+            if (status != 200)
+                throw new Exception($"Expected status 200, got {status}");
+            using var body = await response.Blob();
+            if (body.Size != 4096)
+                throw new Exception($"Expected 4096 bytes, got {body.Size}");
+            return $"Status={status}, Content-Length={body.Size}";
+        });
+
+        // 2. Fetch with Range header (partial content)
+        await RunTest(group, "Fetch /vfs/ URL (Range request)", async () =>
+        {
+            var fetchOptions = new FetchOptions
+            {
+                Headers = new Dictionary<string, string> { ["Range"] = "bytes=0-99" }
+            };
+            using var response = await JS.CallAsync<Response>("fetch",
+                "/vfs/__vfstest_sw__/stream-test.bin", fetchOptions);
+            var status = response.Status;
+            // Service worker may return 200 or 206 depending on implementation
+            if (status != 200 && status != 206)
+                throw new Exception($"Expected status 200 or 206, got {status}");
+            using var body = await response.Blob();
+            // The response should contain ≤ 100 bytes for the range
+            return $"Status={status}, Body size={body.Size}";
+        });
+
+        // 3. Fetch non-existent file
+        await RunTest(group, "Fetch non-existent /vfs/ path", async () =>
+        {
+            using var response = await JS.CallAsync<Response>("fetch", "/vfs/__vfstest_sw__/no-such-file.xyz");
+            var status = response.Status;
+            if (status != 404)
+                throw new Exception($"Expected 404 for missing file, got {status}");
+            return $"Status={status} (correct)";
+        });
+
+        // Cleanup
+        try { await vfs.DeleteAsync(testDir, recursive: true); } catch { }
+
+        StateHasChanged();
+    }
+
+    // ==========================================
+    // Read-Only Handler Tests
+    // ==========================================
+
+    private async Task RunReadOnlyHandlerTests(string mountPath, IFsHandler handler)
+    {
+        var vfs = MediaLibrary.VFS;
+        var group = TestGroups.First(g => g.Name.Contains(handler.DisplayName));
+
+        // 1. List Root
+        await RunTest(group, "List Root", async () =>
+        {
+            var nodes = await vfs.ListDirectoryAsync(mountPath);
+            if (nodes.Count == 0)
+                throw new Exception("No items returned — mount may be empty or not ready");
+            var names = nodes.Select(n => n.Name).Take(5).ToList();
+            return $"{nodes.Count} items: [{string.Join(", ", names)}{(nodes.Count > 5 ? "…" : "")}]";
+        });
+
+        // 2. Resolve first file
+        await RunTest(group, "Resolve File", async () =>
+        {
+            var nodes = await vfs.ListDirectoryAsync(mountPath);
+            var firstFile = await FindFirstFileAsync(vfs, mountPath, nodes, maxDepth: 3);
+            if (firstFile == null) throw new Exception("No files found in mount");
+            return $"Found: {firstFile.Name} ({firstFile.MimeType ?? "unknown"}, {firstFile.Size} bytes)";
+        });
+
+        // 3. Read Range from first file
+        await RunTest(group, "Read Range (first file)", async () =>
+        {
+            var nodes = await vfs.ListDirectoryAsync(mountPath);
+            var firstFile = await FindFirstFileAsync(vfs, mountPath, nodes, maxDepth: 3);
+            if (firstFile == null) throw new Exception("No files found");
+            if (firstFile.Size <= 0)
+            {
+                return $"Skipped — file size is {firstFile.Size} (may still be downloading)";
+            }
+            var readLen = (int)Math.Min(100, firstFile.Size);
+            using var rangeBlob = await firstFile.ReadRangeBlobAsync(0, readLen);
+            if (rangeBlob.Size != readLen)
+                throw new Exception($"Expected {readLen} bytes, got {rangeBlob.Size}");
+            return $"Read {readLen} bytes from {firstFile.Name}";
+        });
+
+        StateHasChanged();
+    }
+
+    // ==========================================
+    // Helpers
+    // ==========================================
+
+    private async Task<IVfsFile?> FindFirstFileAsync(VirtualFileSystem vfs, string path, List<IVfsNode> nodes, int maxDepth)
+    {
+        foreach (var node in nodes)
+        {
+            if (node is IVfsFile file && file.Size > 0)
+                return file;
+        }
+        if (maxDepth <= 0) return null;
+        foreach (var node in nodes)
+        {
+            if (node.NodeType == VfsNodeType.Directory)
+            {
+                var children = await vfs.ListDirectoryAsync(node.Path);
+                var found = await FindFirstFileAsync(vfs, node.Path, children, maxDepth - 1);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private async Task RunTest(TestGroup group, string name, Func<Task<string>> test)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var detail = await test();
+            sw.Stop();
+            group.Results.Add(new TestResult
+            {
+                Name = name,
+                Passed = true,
+                Detail = detail,
+                ElapsedMs = sw.ElapsedMilliseconds
+            });
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            group.Results.Add(new TestResult
+            {
+                Name = name,
+                Passed = false,
+                Detail = ex.Message,
+                ElapsedMs = sw.ElapsedMilliseconds
+            });
+        }
+        StateHasChanged();
+        await Task.Delay(1); // yield to render
+    }
+
+    private void ClearResults()
+    {
+        foreach (var g in TestGroups) g.Results.Clear();
+        StatusMessage = null;
+    }
+
+    // ==========================================
+    // Models
+    // ==========================================
+
+    private class TestGroup
+    {
+        public string Name { get; set; } = "";
+        public string Icon { get; set; } = "📋";
+        public string? Description { get; set; }
+        public List<TestResult> Results { get; set; } = new();
+        public Func<Task> RunTests { get; set; } = () => Task.CompletedTask;
+    }
+
+    private class TestResult
+    {
+        public string Name { get; set; } = "";
+        public bool Passed { get; set; }
+        public string? Detail { get; set; }
+        public long ElapsedMs { get; set; }
+    }
+}

@@ -170,8 +170,12 @@ public class WebTorrentManagerService : IAsyncBackgroundService, IMountHandlerFa
         }
 
         _mediaLibrary.VFS.Mount(mountPath, handler);
-        _handlers[key] = handler;
-        Console.WriteLine($"WebTorrentManager: mounted {displayName} at {mountPath}");
+
+        // Re-key to magnetURI now that torrent is ready (TorrentSource is set by EnsureAccessAsync)
+        var magnetKey = handler.TorrentSource ?? key;
+        _handlers.Remove(key); // remove temp key if different
+        _handlers[magnetKey] = handler;
+        Console.WriteLine($"WebTorrentManager: mounted {displayName} at {mountPath} (key: {magnetKey[..Math.Min(60, magnetKey.Length)]}...)");
 
         // Persist using the magnet URI extracted from the now-ready torrent
         await PersistMountFileAsync(handler, displayName, parentVfsPath);
@@ -179,17 +183,58 @@ public class WebTorrentManagerService : IAsyncBackgroundService, IMountHandlerFa
         return handler;
     }
 
-    /// <summary>Remove a torrent from the VFS and delete its .mount file.</summary>
+    /// <summary>Remove a torrent from the VFS, destroy the torrent (including downloaded data), and delete its .mount file.</summary>
     public async Task RemoveTorrentAsync(string torrentSource)
     {
-        if (!_handlers.TryGetValue(torrentSource, out var handler)) return;
-        var mountPath = handler.GetMountPath();
-        _mediaLibrary.VFS.Unmount(mountPath);
-        _handlers.Remove(torrentSource);
-        Console.WriteLine($"WebTorrentManager: unmounted {handler.DisplayName} from {mountPath}");
+        // Find handler by key — try exact match first, then search by TorrentSource
+        WebTorrentFsHandler? handler = null;
+        string? handlerKey = null;
+        if (_handlers.TryGetValue(torrentSource, out var h))
+        {
+            handler = h;
+            handlerKey = torrentSource;
+        }
+        else
+        {
+            // Search for handler by TorrentSource (magnetURI match)
+            foreach (var kvp in _handlers)
+            {
+                if (kvp.Value.TorrentSource == torrentSource || kvp.Value.DisplayName == torrentSource)
+                {
+                    handler = kvp.Value;
+                    handlerKey = kvp.Key;
+                    break;
+                }
+            }
+        }
+        if (handler == null || handlerKey == null) return;
 
-        // Delete the .mount file from OPFS — derive OPFS path from mount path
-        await DeleteMountFileAsync(handler.DisplayName, mountPath);
+        var mountPath = handler.GetMountPath();
+        var displayName = handler.DisplayName;
+
+        // Unmount from VFS and remove from handler registry
+        _mediaLibrary.VFS.Unmount(mountPath);
+        _handlers.Remove(handlerKey);
+
+        // Destroy the torrent and clean up downloaded data
+        var torrent = handler.Torrent;
+        if (torrent != null)
+        {
+            try
+            {
+                // destroyStore: true tells WebTorrent to delete all downloaded file data
+                await torrent.DestroyAsync(new DestroyTorrentOptions { DestroyStore = true });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"WebTorrentManager: error destroying torrent: {ex.Message}");
+            }
+        }
+
+        Console.WriteLine($"WebTorrentManager: removed {displayName} from {mountPath}");
+
+        // Delete the .mount file from OPFS
+        await DeleteMountFileAsync(displayName, mountPath);
     }
 
     /// <summary>Get all currently mounted torrent handlers.</summary>
@@ -266,9 +311,10 @@ public class WebTorrentManagerService : IAsyncBackgroundService, IMountHandlerFa
     {
         if (_mediaLibrary.OpfsHandler == null) return;
 
-        // Derive OPFS path from mount path: strip leading '/' and replace last segment with .mount
-        var parentDir = mountPath.Contains('/')
-            ? mountPath[1..mountPath.LastIndexOf('/')]
+        // Derive OPFS path from mount path: strip leading '/' and extract parent directory
+        var lastSlash = mountPath.LastIndexOf('/');
+        var parentDir = lastSlash > 0
+            ? mountPath[1..lastSlash]
             : "";
         var fileName = string.IsNullOrEmpty(parentDir)
             ? $"{SanitizeName(displayName)}.mount"
