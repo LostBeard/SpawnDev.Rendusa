@@ -64,12 +64,25 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     private GPURenderPipeline? _blitPipeline;
     private GPUSampler? _blitSampler;
     private GPUShaderModule? _blitModule;
+    private GPUBuffer? _blitDimsBuffer;  // uniform: vec4f(texW, texH, canvasW, canvasH)
 
     // Video frame capture pipeline (render external texture → RGBA texture)
     private GPURenderPipeline? _videoCapturePipeline;
     private GPUShaderModule? _videoCaptureModule;
+    private GPUSampler? _videoCaptureSampler; // cached — same config every frame
     private GPUTexture? _videoCaptureTexture; // RGBA render target for video frames
     private int _videoCaptureW, _videoCaptureH;
+
+    // Texture-to-buffer compute pipeline (RGBA texture → ILGPU storage buffer)
+    private GPUShaderModule? _texToBufModule;
+    private GPUComputePipeline? _texToBufPipeline;
+
+    // UI overlay: Canvas 2D → GPU texture → alpha-blend onto swap chain
+    private GPUShaderModule? _uiOverlayModule;
+    private GPURenderPipeline? _uiOverlayPipeline;
+    private GPUTexture? _uiOverlayTexture;
+    private int _uiOverlayTexW, _uiOverlayTexH;
+    private GPUBindGroup? _cachedUIOverlayBindGroup;
 
     // ── ILGPU Resources ──────────────────────────────────────────
     private Context? _gpuContext;
@@ -82,7 +95,9 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     private MemoryBuffer1D<uint, Stride1D.Dense>? _rightEyeBuffer;    // stereo right
     private MemoryBuffer1D<uint, Stride1D.Dense>? _overlayBuffer;     // UI overlay
     private MemoryBuffer1D<float, Stride1D.Dense>? _fftBuffer;       // FFT data (256 bins)
+    private MemoryBuffer1D<float, Stride1D.Dense>? _depthBuffer;     // Depth map (normalized 0–1)
     private int _frameW, _frameH;
+    private int _depthW, _depthH;
 
     // Output texture (GPUTexture for final blit to canvas)
     private GPUTexture? _outputTexture;
@@ -91,6 +106,10 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     // Buffer-to-texture compute pipeline
     private GPUShaderModule? _bufToTexModule;
     private GPUComputePipeline? _bufToTexPipeline;
+
+    // Cached per-frame bind groups (invalidated on buffer/texture resize)
+    private GPUBindGroup? _cachedTexToBufBindGroup;   // tex-to-buf compute (video capture → ILGPU)
+    private GPUBindGroup? _cachedBufToTexBindGroup;   // buf-to-tex compute (ILGPU → output texture)
 
     // ── Cached Kernel Delegates (shared — used by WGPURenderer itself) ──
     private Action<Index1D, ArrayView<uint>, ArrayView<float>, ArrayView<uint>,
@@ -101,6 +120,7 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
         int, int, int>? _audioVizKernel;
     private Action<Index1D, ArrayView<uint>,
         float, float, float, float>? _clearBufferKernel;
+    private Action<Index1D, ArrayView<uint>, ArrayView<uint>>? _copyBufferKernel;
     private Action<Index1D, ArrayView<uint>, ArrayView<uint>,
         int, int, int, int, int, int, float>? _compositeKernel;
     private Action<Index1D, ArrayView<uint>, ArrayView<uint>,
@@ -118,11 +138,20 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     private readonly Dictionary<string, WGPUOutputRendererBase> _renderers = new();
     private WGPUOutputRendererBase? _activeRenderer;
     private string _activeRendererId = WGPUOutputRendererBase.Flat2DId;
+    private int _outputW, _outputH; // Output dimensions for blit (may differ from _frameW/_frameH for SBS/OU)
 
-    // Text rendering — offscreen 2D canvas (same technique as GLRenderer)
+    // Text rendering — offscreen 2D canvas for measurement only
     private HTMLCanvasElement? _textCanvas;
     private CanvasRenderingContext2D? _textCtx;
     private readonly Dictionary<string, TextTexture> _textCache = new();
+    private const int MaxTextCacheSize = 64;
+
+    // UI overlay canvas — all UI drawing goes here, then bulk-uploaded once per frame
+    private HTMLCanvasElement? _uiCanvas;
+    private CanvasRenderingContext2D? _uiCtx;
+    private int _uiCanvasW, _uiCanvasH;
+    private bool _uiDirty; // true if any Draw* call was made this frame
+    private bool _overlayHasContent; // true if overlay buffer has valid data from a previous frame
 
     // Render loop
     private ActionCallback<double>? _rafCallback;
@@ -219,9 +248,13 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
         // ── Build minimal WGSL blit pipeline ──
         CreateBlitPipeline();
 
-        // ── Text canvas (for text rendering) ──
+        // ── Text canvas (for text measurement — small, reused) ──
         _textCanvas = new HTMLCanvasElement(512, 64);
         _textCtx = _textCanvas.Get2DContext(new CanvasRenderingContext2DSettings { WillReadFrequently = true });
+
+        // ── UI overlay canvas (full-frame, all UI draws go here) ──
+        _uiCanvas = new HTMLCanvasElement(1, 1);
+        _uiCtx = _uiCanvas.Get2DContext();
 
         Console.WriteLine($"[WGPURenderer] Initialized — format={_canvasFormat}");
     }
@@ -246,6 +279,10 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
             Index1D, ArrayView<uint>,
             float, float, float, float>(RenderKernels.ClearBufferKernel);
         Console.WriteLine("[WGPURenderer] ClearBufferKernel compiled");
+
+        _copyBufferKernel = acc.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<uint>, ArrayView<uint>>(RenderKernels.CopyBufferKernel);
+        Console.WriteLine("[WGPURenderer] CopyBufferKernel compiled");
 
         _compositeKernel = acc.LoadAutoGroupedStreamKernel<
             Index1D, ArrayView<uint>, ArrayView<uint>,
@@ -312,6 +349,13 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
             MagFilter = "linear",
         });
 
+        // Create uniform buffer for aspect-ratio dims (vec4f = 16 bytes)
+        _blitDimsBuffer = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16, // 4 * float32
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+
         _blitPipeline = _device.CreateRenderPipeline(new GPURenderPipelineDescriptor
         {
             Layout = "auto",
@@ -352,6 +396,103 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
                 EntryPoint = "main",
             },
         });
+
+        // Texture-to-buffer compute pipeline (inverse — for video/image capture)
+        _texToBufModule = _device.CreateShaderModule(new GPUShaderModuleDescriptor
+        {
+            Code = WGPUShaders.TextureToBuffer
+        });
+        _texToBufPipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
+        {
+            Layout = "auto",
+            Compute = new GPUProgrammableStage
+            {
+                Module = _texToBufModule,
+                EntryPoint = "main",
+            },
+        });
+
+        // Video capture pipeline (external texture → RGBA render target)
+        _videoCaptureModule = _device.CreateShaderModule(new GPUShaderModuleDescriptor
+        {
+            Code = WGPUShaders.VideoToTexture
+        });
+        _videoCaptureSampler = _device.CreateSampler(new GPUSamplerDescriptor
+        {
+            MinFilter = "linear",
+            MagFilter = "linear",
+        });
+        _videoCapturePipeline = _device.CreateRenderPipeline(new GPURenderPipelineDescriptor
+        {
+            Layout = "auto",
+            Vertex = new GPUVertexState
+            {
+                Module = _videoCaptureModule,
+                EntryPoint = "vs_main",
+            },
+            Fragment = new GPUFragmentState
+            {
+                Module = _videoCaptureModule,
+                EntryPoint = "fs_main",
+                Targets = new[]
+                {
+                    new GPUColorTargetState
+                    {
+                        Format = "rgba8unorm",
+                    }
+                }
+            },
+            Primitive = new GPUPrimitiveState
+            {
+                Topology = "triangle-list",
+            },
+        });
+
+        // UI overlay alpha-blend pipeline (composites Canvas 2D UI onto swap chain)
+        _uiOverlayModule = _device.CreateShaderModule(new GPUShaderModuleDescriptor
+        {
+            Code = WGPUShaders.UIOverlayBlit
+        });
+        _uiOverlayPipeline = _device.CreateRenderPipeline(new GPURenderPipelineDescriptor
+        {
+            Layout = "auto",
+            Vertex = new GPUVertexState
+            {
+                Module = _uiOverlayModule,
+                EntryPoint = "vs_main",
+            },
+            Fragment = new GPUFragmentState
+            {
+                Module = _uiOverlayModule,
+                EntryPoint = "fs_main",
+                Targets = new[]
+                {
+                    new GPUColorTargetState
+                    {
+                        Format = _canvasFormat,
+                        Blend = new GPUBlendState
+                        {
+                            Color = new GPUBlendComponent
+                            {
+                                SrcFactor = "src-alpha",
+                                DstFactor = "one-minus-src-alpha",
+                                Operation = "add",
+                            },
+                            Alpha = new GPUBlendComponent
+                            {
+                                SrcFactor = "one",
+                                DstFactor = "one-minus-src-alpha",
+                                Operation = "add",
+                            },
+                        },
+                    }
+                }
+            },
+            Primitive = new GPUPrimitiveState
+            {
+                Topology = "triangle-list",
+            },
+        });
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -372,13 +513,43 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
         _rightEyeBuffer?.Dispose();
         _overlayBuffer?.Dispose();
 
+        // Invalidate cached bind groups that reference these buffers
+        _cachedTexToBufBindGroup?.Dispose();
+        _cachedTexToBufBindGroup = null;
+        _cachedBufToTexBindGroup?.Dispose();
+        _cachedBufToTexBindGroup = null;
+        _cachedUIOverlayBindGroup?.Dispose();
+        _cachedUIOverlayBindGroup = null;
+
         _frameBuffer = _accelerator!.Allocate1D<uint>(len);
         _outputBuffer = _accelerator.Allocate1D<uint>(len);
         _leftEyeBuffer = _accelerator.Allocate1D<uint>(len);
         _rightEyeBuffer = _accelerator.Allocate1D<uint>(len);
         _overlayBuffer = _accelerator.Allocate1D<uint>(len);
 
+        // UI canvas is sized to canvas (player) dimensions, not video frames
+        // — called separately in RenderFrame before UI draws
+
         Console.WriteLine($"[WGPURenderer] Buffers resized: {width}x{height} ({len} pixels)");
+    }
+
+    /// <summary>Ensure the UI overlay canvas matches the CANVAS (player) dimensions.
+    /// This is intentionally different from the frame buffer (video) dimensions
+    /// so the UI controls are positioned relative to the player viewport, not the video.</summary>
+    private void EnsureUICanvas()
+    {
+        if (_uiCanvas == null || _uiCtx == null || _canvas == null) return;
+        int cw = _canvas.Width;
+        int ch = _canvas.Height;
+        if (cw <= 0 || ch <= 0) return;
+        if (_uiCanvasW == cw && _uiCanvasH == ch) return;
+        _uiCanvasW = cw;
+        _uiCanvasH = ch;
+        _uiCanvas.Width = cw;
+        _uiCanvas.Height = ch;
+        // Invalidate cached bind group since texture size changes
+        _cachedUIOverlayBindGroup?.Dispose();
+        _cachedUIOverlayBindGroup = null;
     }
 
     private void EnsureOutputTexture(int width, int height)
@@ -387,6 +558,8 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
 
         _outputTexture?.Destroy();
         _outputTexture?.Dispose();
+        _cachedBufToTexBindGroup?.Dispose();
+        _cachedBufToTexBindGroup = null;
 
         _outputTexW = width;
         _outputTexH = height;
@@ -407,18 +580,96 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     /// <summary>Upload an image's pixels to the frame buffer.</summary>
     public void UploadImageTexture(HTMLImageElement img)
     {
-        ImageDimensions = (img.NaturalWidth, img.NaturalHeight);
-        // Image upload will be done by copying canvas pixels to buffer
-        // We render the image to a temp canvas, then readback
+        if (_accelerator == null || _device == null) return;
+
+        int w = img.NaturalWidth;
+        int h = img.NaturalHeight;
+        if (w <= 0 || h <= 0) return;
+
+        ImageDimensions = (w, h);
+        EnsureFrameBuffers(w, h);
+
+        // Render image to a temporary canvas, read back pixel data
+        using var tempCanvas = new HTMLCanvasElement(w, h);
+        using var ctx2d = tempCanvas.Get2DContext();
+        ctx2d.DrawImage(img, 0, 0, w, h);
+        using var imageData = ctx2d.GetImageData(0, 0, w, h);
+        using var pixels = imageData.Data; // Uint8ClampedArray (RGBA bytes)
+
+        // Upload pixel data to the ILGPU frame buffer via the staging texture path
+        // Create a temp RGBA texture, copy image data to it, then tex→buf
+        CapturePixelsToFrameBuffer(pixels, w, h);
+
+        Console.WriteLine($"[WGPURenderer] Image uploaded: {w}x{h}");
+        Invalidate();
     }
 
-    /// <summary>Upload depth texture data (normalized 0–1 floats) for 3D rendering.</summary>
+    /// <summary>Upload depth texture data from a GPU-resident ILGPU buffer (zero-copy).</summary>
+    public void SetDepthFromGpuView(int width, int height, MemoryBuffer1D<float, Stride1D.Dense> sourceBuffer)
+    {
+        if (_accelerator == null) return;
+
+        int len = width * height;
+        if (len <= 0) return;
+
+        // Resize our depth buffer if needed 
+        if (_depthBuffer == null || _depthW != width || _depthH != height)
+        {
+            _depthBuffer?.Dispose();
+            _depthBuffer = _accelerator.Allocate1D<float>(len);
+            _depthW = width;
+            _depthH = height;
+        }
+
+        // GPU-to-GPU copy via WebGPU copyBufferToBuffer — no CPU round-trip
+        if (_accelerator is WebGPUAccelerator webGpuAcc)
+        {
+            var srcBuf = ((IArrayView)sourceBuffer).Buffer as WebGPUMemoryBuffer;
+            var dstBuf = ((IArrayView)_depthBuffer).Buffer as WebGPUMemoryBuffer;
+            if (srcBuf != null && dstBuf != null)
+            {
+                var device = webGpuAcc.NativeAccelerator.NativeDevice!;
+                long byteLength = len * sizeof(float);
+                using var encoder = device.CreateCommandEncoder();
+                encoder.CopyBufferToBuffer(
+                    srcBuf.NativeBuffer.NativeBuffer!, 0,
+                    dstBuf.NativeBuffer.NativeBuffer!, 0,
+                    (ulong)byteLength);
+                using var cmd = encoder.Finish();
+                webGpuAcc.NativeAccelerator.Queue!.Submit(new[] { cmd });
+            }
+        }
+        else
+        {
+            // CPU accelerator fallback
+            sourceBuffer.View.CopyTo(_depthBuffer.View);
+        }
+        State.DepthReady = true;
+    }
+
+    /// <summary>Upload depth texture data (normalized 0–1 floats) for 3D rendering (CPU path, e.g. images).</summary>
     public void UploadDepthTexture(int width, int height, Float32Array data)
     {
-        // Depth data is already in ILGPU buffers via DepthEstimationService
-        // This method exists for API compatibility — the depth buffer
-        // reference is set directly by the output renderer.
+        if (_accelerator == null) return;
+
+        int len = width * height;
+        if (len <= 0) return;
+
+        // Resize depth buffer if needed
+        if (_depthBuffer == null || _depthW != width || _depthH != height)
+        {
+            _depthBuffer?.Dispose();
+            _depthBuffer = _accelerator.Allocate1D<float>(len);
+            _depthW = width;
+            _depthH = height;
+        }
+
+        // Copy Float32Array data to managed array, then upload to ILGPU buffer
+        var managed = data.ToArray();
+        _depthBuffer.CopyFromCPU(managed);
+        State.DepthReady = true;
     }
+
 
     /// <summary>Reset depth state when switching media.</summary>
     public void ClearDepth()
@@ -470,6 +721,8 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
 
         try
         {
+            var swTotal = System.Diagnostics.Stopwatch.StartNew();
+
             // Delta time
             float dt;
             if (_lastFrameTime > 0)
@@ -498,38 +751,98 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
             using var swapTexture = _gpuCtx.GetCurrentTexture();
             using var swapView = swapTexture.CreateView();
 
+            var tSetup = swTotal.ElapsedMilliseconds;
+
             // Determine what to render
             bool hasVideo = State.MediaType == MediaType.Video && VideoElement != null;
             bool hasImage = State.MediaType == MediaType.Image && ImageDimensions.HasValue;
             bool hasAudio = State.MediaType == MediaType.Audio;
 
-            // Video fast path: blit directly, no compositing pipeline
+            // Phase 1: Feed content into the ILGPU pipeline (populate _outputBuffer)
+            bool contentHandled = false;
             if (hasVideo)
             {
-                RenderVideoFrame(swapView, swapTexture, dt);
-                OnFrame?.Invoke(dt);
-                return;
+                contentHandled = RenderVideoFrame(swapView, swapTexture, dt);
             }
-
-            // For audio/idle paths: render content into _outputBuffer
-            if (hasAudio)
+            else if (hasImage)
+            {
+                RenderImageFrame(swapView, dt);
+                contentHandled = true;
+            }
+            else if (hasAudio)
             {
                 RenderAudioFrame(swapView, swapTexture, dt);
+                contentHandled = true;
             }
             else
             {
-                // Clear to dark background
-                RenderClearFrame(swapView);
+                // Idle: clear canvas directly via render pass (no ILGPU needed)
+                using var encoder = _device!.CreateCommandEncoder();
+                using var pass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+                {
+                    ColorAttachments = new[]
+                    {
+                        new GPURenderPassColorAttachment
+                        {
+                            View = swapView,
+                            LoadOp = "clear",
+                            StoreOp = "store",
+                            ClearValue = new GPUColorDict { R = 0.008, G = 0.008, B = 0.035, A = 1 },
+                        }
+                    }
+                });
+                pass.End();
+                using var cmd = encoder.Finish();
+                _device.Queue.Submit(new[] { cmd });
             }
 
-            // Fire frame event — UI draws into _overlayBuffer
+            var tContent = swTotal.ElapsedMilliseconds;
+
+            // Phase 2: UI overlay draws
+            EnsureUICanvas(); // Ensure UI canvas matches player viewport dimensions
+            _uiDirty = false;
             OnFrame?.Invoke(dt);
 
-            // Composite overlay onto output buffer
-            CompositeOverlayToOutput();
+            // Update the GPU texture with new Canvas 2D content
+            if (_uiDirty)
+            {
+                UpdateUITexture();
+                _overlayHasContent = true;
+            }
+            else if (_overlayHasContent)
+            {
+                // UI was hidden — clear the cached texture state
+                _overlayHasContent = false;
+            }
 
-            // Blit output buffer → GPU texture → swap chain canvas
-            CopyBufferToTextureAndBlit(swapView);
+            var tOnFrame = swTotal.ElapsedMilliseconds;
+
+            // Phase 3: Blit video to canvas
+            if (contentHandled)
+            {
+                // NOTE: CompositeOverlayToOutput removed — ILGPU overlay buffer is no longer
+                // used for UI. All UI compositing goes through Canvas 2D → GPU texture →
+                // alpha-blend render pass in Phase 4.
+
+                // Flush batched ILGPU commands so the output buffer is ready for WebGPU blit
+                if (_accelerator is WebGPUAccelerator wga)
+                    wga.FlushPendingCommands();
+
+                // Blit output buffer → GPU texture → swap chain canvas
+                CopyBufferToTextureAndBlit(swapView);
+            }
+
+            // Phase 4: Alpha-blend UI overlay onto swap chain (at canvas resolution)
+            if (_overlayHasContent)
+                CompositeUIToSwapChain(swapView);
+
+            var tPhase3 = swTotal.ElapsedMilliseconds;
+
+            // Log every 10 frames (faster feedback at low FPS)
+            if (_frameCount > 0 && _frameCount % 10 == 0)
+            {
+                Console.WriteLine($"[PERF-FULL] Setup={tSetup}ms  Content={tContent-tSetup}ms  OnFrame={tOnFrame-tContent}ms  Phase3={tPhase3-tOnFrame}ms  TOTAL={tPhase3}ms  (frame #{_frameCount})");
+            }
 
             if (_frameCount++ == 0)
                 Console.WriteLine("[WGPURenderer] First frame rendered successfully");
@@ -546,29 +859,322 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     //  Frame Rendering
     // ══════════════════════════════════════════════════════════════
 
-    private void RenderVideoFrame(GPUTextureView swapView, GPUTexture swapTexture, float dt)
+    /// <returns>True if the ILGPU output buffer was populated and is ready for compositing+blit.</returns>
+    private bool RenderVideoFrame(GPUTextureView swapView, GPUTexture swapTexture, float dt)
     {
-        if (VideoElement == null || _device == null) return;
+        if (VideoElement == null || _device == null || _accelerator == null) return false;
+
+        // Don't attempt to read video frames until at least one frame is decoded.
+        // readyState < 2 (HAVE_CURRENT_DATA) means no frame data is available yet.
+        if (VideoElement.ReadyState < 2) return false;
 
         int videoW = VideoElement.VideoWidth;
         int videoH = VideoElement.VideoHeight;
-        if (videoW <= 0 || videoH <= 0) return;
+        if (videoW <= 0 || videoH <= 0) return false;
 
-        bool needsProcessing = State.DepthReady ||
-                               State.InputFormat != StereoLayout.Mono2D ||
-                               State.OutputRenderer != OutputRendererBase.Flat2DId;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        if (!needsProcessing)
+        // All video frames go through the ILGPU pipeline to ensure UI overlay is composited
+        EnsureFrameBuffers(videoW, videoH);
+        EnsureOutputTexture(videoW, videoH);
+        var t0 = sw.ElapsedMilliseconds;
+
+        // Step 1: Capture video frame → staging texture → ILGPU frame buffer
+        CaptureVideoToFrameBuffer(videoW, videoH);
+        var t1 = sw.ElapsedMilliseconds;
+
+        // Step 2-4: Process through output renderer pipeline
+        ProcessFrameWithOutputRenderer(videoW, videoH);
+        var t2 = sw.ElapsedMilliseconds;
+
+        // Log per-phase timing every 60 frames
+        if (_frameCount > 0 && _frameCount % 60 == 0)
         {
-            // Fast path: blit video directly to canvas (no ILGPU)
-            BlitExternalTextureToCanvas(swapView);
+            Console.WriteLine($"[PERF] Ensure={t0}ms  Capture={t1-t0}ms  Process={t2-t1}ms  Total={t2}ms  (frame #{_frameCount})");
+        }
+
+        return true; // output buffer populated — caller handles overlay+blit
+    }
+
+    /// <summary>
+    /// Capture video frame to the ILGPU _frameBuffer using:
+    /// CopyExternalImageToTexture → staging texture → tex-to-buf compute → ILGPU buffer.
+    /// No render pass needed — CopyExternalImageToTexture copies video frames directly.
+    /// </summary>
+    private void CaptureVideoToFrameBuffer(int w, int h)
+    {
+        if (_device == null || _texToBufPipeline == null ||
+            VideoElement == null || _frameBuffer == null || _accelerator is not WebGPUAccelerator) return;
+
+        // Ensure staging texture matches video dimensions
+        EnsureVideoCaptureTexture(w, h);
+
+        // Resolve ILGPU buffer → native GPU buffer
+        var nativeBuffer = _frameBuffer.AsContiguous() is IContiguousArrayView contiguous
+            ? contiguous.Buffer as WebGPUMemoryBuffer : null;
+        if (nativeBuffer == null) return;
+        var gpuBuffer = nativeBuffer.NativeBuffer.NativeBuffer!;
+
+        // Step 1: Copy video frame directly to staging texture (1 JS call)
+        _device.Queue.CopyExternalImageToTexture(
+            new GPUCopyExternalImageSourceInfo { Source = VideoElement },
+            new GPUCopyExternalImageDestInfo { Texture = _videoCaptureTexture! },
+            new GPUExtent3DDict { Width = (uint)w, Height = (uint)h }
+        );
+
+        // Step 2: Tex-to-buf compute (staging texture → ILGPU buffer)
+        // Cache bind group — only recreate when texture/buffer changes (on resize)
+        if (_cachedTexToBufBindGroup == null)
+        {
+            using var texView = _videoCaptureTexture!.CreateView();
+            _cachedTexToBufBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
+            {
+                Layout = _texToBufPipeline.GetBindGroupLayout(0),
+                Entries = new[]
+                {
+                    new GPUBindGroupEntry { Binding = 0, Resource = texView },
+                    new GPUBindGroupEntry { Binding = 1, Resource = gpuBuffer },
+                }
+            });
+        }
+
+        using var encoder = _device.CreateCommandEncoder();
+        using var computePass = encoder.BeginComputePass();
+        computePass.SetPipeline(_texToBufPipeline);
+        computePass.SetBindGroup(0, _cachedTexToBufBindGroup);
+        computePass.DispatchWorkgroups((uint)((w + 15) / 16), (uint)((h + 15) / 16));
+        computePass.End();
+
+        using var cmd = encoder.Finish();
+        _device.Queue.Submit(new[] { cmd });
+    }
+
+
+    /// <summary>
+    /// Ensure the video capture staging texture matches the required dimensions.
+    /// </summary>
+    private void EnsureVideoCaptureTexture(int w, int h)
+    {
+        if (_videoCaptureW == w && _videoCaptureH == h && _videoCaptureTexture != null) return;
+
+        _videoCaptureTexture?.Destroy();
+        _videoCaptureTexture?.Dispose();
+        _cachedTexToBufBindGroup?.Dispose();
+        _cachedTexToBufBindGroup = null;
+
+        _videoCaptureW = w;
+        _videoCaptureH = h;
+
+        _videoCaptureTexture = _device!.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { w, h },
+            Format = "rgba8unorm",
+            // CopyDst for CopyExternalImageToTexture, TextureBinding for tex-to-buf compute
+            Usage = GPUTextureUsage.TextureBinding | GPUTextureUsage.CopyDst | GPUTextureUsage.RenderAttachment,
+        });
+    }
+
+    /// <summary>
+    /// Upload raw pixel data (Uint8ClampedArray RGBA bytes) to the ILGPU frame buffer.
+    /// Used for image upload.
+    /// </summary>
+    private void CapturePixelsToFrameBuffer(Uint8ClampedArray pixels, int w, int h)
+    {
+        if (_device == null || _frameBuffer == null) return;
+
+        // Create a temporary texture, upload pixels via queue.writeTexture, then tex→buf
+        using var tempTexture = _device.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { w, h },
+            Format = "rgba8unorm",
+            Usage = GPUTextureUsage.TextureBinding | GPUTextureUsage.CopyDst,
+        });
+
+        // Write pixel data to texture
+        // Uint8ClampedArray is RGBA bytes — 4 bytes per pixel
+        using var u8view = new Uint8Array(pixels.Buffer);
+        _device.Queue.WriteTexture(
+            new GPUTexelCopyTextureInfo { Texture = tempTexture },
+            u8view,
+            new GPUTexelCopyBufferLayout { BytesPerRow = (uint)(w * 4), RowsPerImage = (uint)h },
+            new uint[] { (uint)w, (uint)h }
+        );
+
+        // Copy texture → ILGPU buffer via tex-to-buf compute shader
+        if (_texToBufPipeline != null && _accelerator is WebGPUAccelerator)
+        {
+            var nativeBuffer = _frameBuffer.AsContiguous() is IContiguousArrayView contiguous
+                ? contiguous.Buffer as WebGPUMemoryBuffer : null;
+            if (nativeBuffer != null)
+            {
+                var gpuBuffer = nativeBuffer.NativeBuffer.NativeBuffer!;
+                using var texView = tempTexture.CreateView();
+                using var bindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
+                {
+                    Layout = _texToBufPipeline.GetBindGroupLayout(0),
+                    Entries = new[]
+                    {
+                        new GPUBindGroupEntry { Binding = 0, Resource = texView },
+                        new GPUBindGroupEntry { Binding = 1, Resource = gpuBuffer },
+                    }
+                });
+
+                using var encoder = _device.CreateCommandEncoder();
+                using var pass = encoder.BeginComputePass();
+                pass.SetPipeline(_texToBufPipeline);
+                pass.SetBindGroup(0, bindGroup);
+                pass.DispatchWorkgroups((uint)((w + 15) / 16), (uint)((h + 15) / 16));
+                pass.End();
+                using var cmd = encoder.Finish();
+                _device.Queue.Submit(new[] { cmd });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Process _frameBuffer through the output renderer pipeline:
+    /// stereo extract → depth displacement → output renderer → overlay
+    /// </summary>
+    private void ProcessFrameWithOutputRenderer(int srcW, int srcH)
+    {
+        if (_accelerator == null || _activeRenderer == null ||
+            _frameBuffer == null || _outputBuffer == null ||
+            _leftEyeBuffer == null || _rightEyeBuffer == null) return;
+
+        int len = srcW * srcH;
+        bool isStereo = _activeRenderer.IsStereo;
+        bool hasStereoInput = State.InputFormat != StereoLayout.Mono2D;
+        bool isFlat2DMono = _activeRendererId == WGPUOutputRendererBase.Flat2DId
+            && !hasStereoInput;
+
+        // Determine eye dimensions based on input format
+        int eyeW = srcW, eyeH = srcH;
+
+        // Classify the source format into eye extract coords
+        int formatL = 0, formatR = 0; // StereoExtract format codes
+        switch (State.InputFormat)
+        {
+            case StereoLayout.SideBySide:
+            case StereoLayout.HalfSideBySide:
+                eyeW = srcW / 2;
+                formatL = 1; // SBS-Left
+                formatR = 2; // SBS-Right
+                break;
+            case StereoLayout.OverUnder:
+            case StereoLayout.HalfOverUnder:
+                eyeH = srcH / 2;
+                formatL = 3; // OU-Top (Left)
+                formatR = 4; // OU-Bottom (Right)
+                break;
+            default:
+                formatL = 0; // Mono (full)
+                formatR = 0;
+                break;
+        }
+
+        int eyePixels = eyeW * eyeH;
+
+        if (isFlat2DMono)
+        {
+            // ── FAST: 2D mono — _frameBuffer IS the output, skip extract+clear+copy ──
+            // No StereoExtract needed (already full-frame in _frameBuffer)
+            // No ClearBuffer needed (we'll composite overlay directly onto _frameBuffer)
+            // No Flat2D CopyBuffer needed (_frameBuffer IS the output)
+            _frameW = srcW;
+            _frameH = srcH;
+            _outputW = srcW;
+            _outputH = srcH;
             return;
         }
 
-        // Full pipeline: video → buffer → ILGPU kernels → blit
-        // TODO: Implement video frame capture and ILGPU processing pipeline
-        // For now, use fast path as placeholder
-        BlitExternalTextureToCanvas(swapView);
+        // Extract left eye from source
+        _stereoExtractKernel!((Index1D)eyePixels,
+            _frameBuffer.View, _leftEyeBuffer.View,
+            formatL, srcW, srcH, eyeW, eyeH, 0, 0, srcW, srcH);
+
+        // Extract right eye (or synthesize from depth)
+        if (isStereo)
+        {
+            if (hasStereoInput)
+            {
+                // Extract right eye from stereo source
+                _stereoExtractKernel((Index1D)eyePixels,
+                    _frameBuffer.View, _rightEyeBuffer.View,
+                    formatR, srcW, srcH, eyeW, eyeH, 0, 0, srcW, srcH);
+            }
+            else if (State.DepthReady && _depthBuffer != null)
+            {
+                // Synthesize right eye from depth displacement
+                float eyeOffset = -1f; // negative = shift right for right eye synthesis
+                float intensity = State.DepthIntensity;
+                float convergence = State.Convergence;
+
+                // Create displaced right eye
+                _depthDisplaceKernel!((Index1D)eyePixels,
+                    _leftEyeBuffer.View, _depthBuffer.View, _rightEyeBuffer.View,
+                    eyeOffset, intensity, convergence, eyeW, eyeH);
+            }
+            else
+            {
+                // No stereo source and no depth — copy left to right
+                _copyBufferKernel!((Index1D)eyePixels, _leftEyeBuffer.View, _rightEyeBuffer.View);
+            }
+        }
+
+        // Output dimensions come from the renderer (SBS=2x width, OU=2x height, etc.)
+        var (outW, outH) = _activeRenderer.GetOutputDimensions(eyeW, eyeH);
+
+        int outPixels = outW * outH;
+        // Ensure output buffer is large enough
+        if (_outputBuffer.Length < outPixels)
+        {
+            _outputBuffer.Dispose();
+            _outputBuffer = _accelerator.Allocate1D<uint>(outPixels);
+            _cachedBufToTexBindGroup?.Dispose();
+            _cachedBufToTexBindGroup = null;
+        }
+
+        _clearBufferKernel!((Index1D)outPixels, _outputBuffer.View, 0f, 0f, 0f, 1f);
+
+        // Build render context and dispatch to active output renderer
+        var ctx = new RenderContext
+        {
+            LeftEye = _leftEyeBuffer.View,
+            RightEye = isStereo ? _rightEyeBuffer.View : default,
+            Depth = (State.DepthReady && _depthBuffer != null) ? _depthBuffer.View : default,
+            Output = _outputBuffer.View,
+            EyeWidth = eyeW,
+            EyeHeight = eyeH,
+            DepthWidth = _depthW,
+            DepthHeight = _depthH,
+            OutputWidth = outW,
+            OutputHeight = outH,
+        };
+
+        _activeRenderer.Render(ref ctx, State);
+
+        // Update OUTPUT dimensions for blit (may differ from source for SBS/OU output)
+        // Note: _frameW/_frameH remain as the source video dimensions (set by EnsureFrameBuffers)
+        _outputW = outW;
+        _outputH = outH;
+    }
+
+    /// <summary>
+    /// Render an image frame through the output renderer pipeline.
+    /// Image pixels are already in _frameBuffer from UploadImageTexture.
+    /// </summary>
+    private void RenderImageFrame(GPUTextureView swapView, float dt)
+    {
+        if (_accelerator == null || !ImageDimensions.HasValue || _frameBuffer == null) return;
+
+        var (imgW, imgH) = ImageDimensions.Value;
+        if (imgW <= 0 || imgH <= 0) return;
+
+        EnsureFrameBuffers(imgW, imgH);
+        EnsureOutputTexture(imgW, imgH);
+
+        // Process through the same output renderer pipeline as video
+        ProcessFrameWithOutputRenderer(imgW, imgH);
     }
 
     private void RenderAudioFrame(GPUTextureView swapView, GPUTexture swapTexture, float dt)
@@ -587,10 +1193,27 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
             0.008f, 0.008f, 0.035f, 1f);
 
         // Draw audio visualization if FFT data available
-        if (Analyser != null && FftData != null && _fftBuffer != null)
+        if (Analyser != null && FftData != null && _audioVizKernel != null)
         {
             Analyser.GetByteFrequencyData(FftData);
-            // TODO: Upload FFT data to ILGPU buffer and dispatch AudioVizKernel
+
+            // Convert Uint8Array FFT data (0–255) to float (0–1) and upload
+            int fftLen = (int)FftData.Length;
+            if (_fftBuffer == null || _fftBuffer.Length != fftLen)
+            {
+                _fftBuffer?.Dispose();
+                _fftBuffer = _accelerator.Allocate1D<float>(fftLen);
+            }
+
+            var fftBytes = FftData.ToArray();
+            var fftManaged = new float[fftLen];
+            for (int i = 0; i < fftLen; i++)
+                fftManaged[i] = fftBytes[i] / 255f;
+
+            _fftBuffer.CopyFromCPU(fftManaged);
+
+            // Dispatch AudioViz kernel
+            _audioVizKernel((Index1D)len, _fftBuffer.View, _outputBuffer.View, w, h, fftLen);
         }
     }
 
@@ -619,25 +1242,46 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     /// </summary>
     private void CompositeOverlayToOutput()
     {
-        if (_overlayBuffer == null || _outputBuffer == null || _compositeKernel == null) return;
+        if (_overlayBuffer == null || _compositeKernel == null) return;
 
-        int w = _frameW;
-        int h = _frameH;
-        if (w <= 0 || h <= 0) return;
-        int len = w * h;
+        int outW = _frameW;
+        int outH = _frameH;
+        if (outW <= 0 || outH <= 0) return;
 
-        // Alpha-composite overlay onto output at (0,0) full size, 100% opacity
-        _compositeKernel((Index1D)len, _outputBuffer.View, _overlayBuffer.View,
-            w, h, w, h, 0, 0, 1.0f);
+        // Overlay buffer is always at source dimensions (allocated in EnsureFrameBuffers)
+        int ovlLen = (int)_overlayBuffer.Length;
 
-        // Clear overlay for the next frame's UI draws
-        _clearBufferKernel!((Index1D)len, _overlayBuffer.View,
-            0f, 0f, 0f, 0f);
+        // Determine which buffer receives the composite
+        bool isFlat2DMono = _activeRendererId == WGPUOutputRendererBase.Flat2DId
+            && State.InputFormat == StereoLayout.Mono2D;
+
+        // For flat 2D mono, output IS _frameBuffer (no separate output buffer was populated)
+        var targetBuffer = isFlat2DMono ? _frameBuffer! : _outputBuffer!;
+        int targetLen = (int)targetBuffer.Length;
+
+        // Alpha-composite overlay onto target buffer
+        _compositeKernel((Index1D)targetLen, targetBuffer.View, _overlayBuffer.View,
+            outW, outH, outW, outH, 0, 0, 1.0f);
+
+        // NOTE: Overlay buffer is NOT cleared here — it persists for throttled UI redraws.
+        // FlushUIOverlay fully overwrites the buffer via tex-to-buf compute shader.
     }
 
     // ══════════════════════════════════════════════════════════════
     //  Blit Operations
     // ══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Update the blit shader uniform buffer with texture and canvas dimensions
+    /// for aspect-ratio-correct rendering.
+    /// </summary>
+    private void UpdateBlitDims(int texW, int texH, int canvasW, int canvasH)
+    {
+        if (_device == null || _blitDimsBuffer == null) return;
+        var data = new float[] { texW, texH, canvasW, canvasH };
+        using var f32 = new Float32Array(data);
+        _device.Queue.WriteBuffer(_blitDimsBuffer, 0, f32);
+    }
 
     /// <summary>
     /// Fast-path: blit video frame directly to canvas using importExternalTexture.
@@ -677,7 +1321,12 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
 
         using var texView = _outputTexture.CreateView();
 
-        // Create bind group for the blit shader
+        // Update aspect-ratio uniform
+        int canW = _canvas?.Width ?? _outputTexW;
+        int canH = _canvas?.Height ?? _outputTexH;
+        UpdateBlitDims(_outputTexW, _outputTexH, canW, canH);
+
+        // Create bind group for the blit shader (sampler + texture + dims uniform)
         using var bindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
         {
             Layout = _blitPipeline.GetBindGroupLayout(0),
@@ -685,6 +1334,7 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
             {
                 new GPUBindGroupEntry { Binding = 0, Resource = _blitSampler! },
                 new GPUBindGroupEntry { Binding = 1, Resource = texView },
+                new GPUBindGroupEntry { Binding = 2, Resource = new GPUBufferBinding { Buffer = _blitDimsBuffer!, Size = 16 } },
             }
         });
 
@@ -714,120 +1364,184 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
 
     /// <summary>
     /// Copy ILGPU output buffer → GPU texture → blit to canvas.
-    /// Used when ILGPU kernels have processed the frame.
+    /// Both passes (buf-to-tex compute + blit render) share a single encoder+submit.
     /// </summary>
     private void CopyBufferToTextureAndBlit(GPUTextureView swapView)
     {
-        if (_device == null || _outputBuffer == null || _accelerator == null) return;
+        if (_device == null || _outputBuffer == null || _accelerator == null ||
+            _blitPipeline == null || _outputTexture == null) return;
 
-        int w = _frameW;
-        int h = _frameH;
+        int w = _outputW > 0 ? _outputW : _frameW;
+        int h = _outputH > 0 ? _outputH : _frameH;
         EnsureOutputTexture(w, h);
 
-        // Use a compute shader to copy the ILGPU buffer → output texture.
-        // This avoids WebGPU's bytesPerRow 256-byte alignment requirement
-        // that copyBufferToTexture imposes.
-        if (_accelerator is WebGPUAccelerator webGpuAcc && _bufToTexPipeline != null)
+        using var encoder = _device.CreateCommandEncoder();
+
+        // ── Pass 1: buf-to-tex compute (ILGPU buffer → output texture) ──
+        if (_accelerator is WebGPUAccelerator && _bufToTexPipeline != null)
         {
-            var nativeBuffer = _outputBuffer.AsContiguous() is IContiguousArrayView contiguous
+            // Determine which buffer to blit from:
+            // For flat 2D mono, output IS _frameBuffer (ProcessFrameWithOutputRenderer skips the copy)
+            bool isFlat2DMono = _activeRendererId == WGPUOutputRendererBase.Flat2DId
+                && State.InputFormat == StereoLayout.Mono2D;
+            var blitSourceBuffer = isFlat2DMono ? _frameBuffer! : _outputBuffer!;
+
+            var nativeBuffer = blitSourceBuffer.AsContiguous() is IContiguousArrayView contiguous
                 ? contiguous.Buffer as WebGPUMemoryBuffer : null;
             if (nativeBuffer != null)
             {
                 var gpuBuffer = nativeBuffer.NativeBuffer.NativeBuffer!;
 
-                using var texView = _outputTexture!.CreateView();
-                using var bindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
+                // Cache bind group — only recreate on resize
+                if (_cachedBufToTexBindGroup == null)
                 {
-                    Layout = _bufToTexPipeline.GetBindGroupLayout(0),
-                    Entries = new[]
+                    using var texView = _outputTexture!.CreateView();
+                    _cachedBufToTexBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
                     {
-                        new GPUBindGroupEntry { Binding = 0, Resource = gpuBuffer },
-                        new GPUBindGroupEntry { Binding = 1, Resource = texView },
-                    }
-                });
+                        Layout = _bufToTexPipeline.GetBindGroupLayout(0),
+                        Entries = new[]
+                        {
+                            new GPUBindGroupEntry { Binding = 0, Resource = gpuBuffer },
+                            new GPUBindGroupEntry { Binding = 1, Resource = texView },
+                        }
+                    });
+                }
 
-                using var encoder = _device.CreateCommandEncoder();
-                using var pass = encoder.BeginComputePass();
-                pass.SetPipeline(_bufToTexPipeline);
-                pass.SetBindGroup(0, bindGroup);
-                // Dispatch enough workgroups to cover every pixel
-                pass.DispatchWorkgroups(
+                using var computePass = encoder.BeginComputePass();
+                computePass.SetPipeline(_bufToTexPipeline);
+                computePass.SetBindGroup(0, _cachedBufToTexBindGroup);
+                computePass.DispatchWorkgroups(
                     (uint)((w + 15) / 16),
                     (uint)((h + 15) / 16));
-                pass.End();
-                using var cmd = encoder.Finish();
-                _device.Queue.Submit(new[] { cmd });
+                computePass.End();
             }
         }
 
-        BlitTextureToCanvas(swapView);
+        // ── Pass 2: blit render (output texture → canvas swap chain) ──
+        // Update aspect-ratio uniform
+        int canW = _canvas?.Width ?? w;
+        int canH = _canvas?.Height ?? h;
+        UpdateBlitDims(w, h, canW, canH);
+
+        using var blitTexView = _outputTexture!.CreateView();
+        using var blitBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
+        {
+            Layout = _blitPipeline.GetBindGroupLayout(0),
+            Entries = new[]
+            {
+                new GPUBindGroupEntry { Binding = 0, Resource = _blitSampler! },
+                new GPUBindGroupEntry { Binding = 1, Resource = blitTexView },
+                new GPUBindGroupEntry { Binding = 2, Resource = _blitDimsBuffer! },
+            }
+        });
+
+        using var renderPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+        {
+            ColorAttachments = new[]
+            {
+                new GPURenderPassColorAttachment
+                {
+                    View = swapView,
+                    LoadOp = "clear",
+                    StoreOp = "store",
+                    ClearValue = new GPUColorDict { R = 0, G = 0, B = 0, A = 1 },
+                }
+            }
+        });
+        renderPass.SetPipeline(_blitPipeline);
+        renderPass.SetBindGroup(0, blitBindGroup);
+        renderPass.Draw(3);
+        renderPass.End();
+
+        // Single submit for both passes
+        using var cmd = encoder.Finish();
+        _device.Queue.Submit(new[] { cmd });
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  Drawing Primitives (dispatch ILGPU kernels)
-    //  Used by UI overlay rendering
+    //  Drawing Primitives — use Canvas 2D on UI overlay canvas
+    //  (Replaces per-element ILGPU kernel dispatches with
+    //   browser-native canvas operations + single bulk upload)
     // ══════════════════════════════════════════════════════════════
 
-    /// <summary>Draw a solid-color rectangle on the overlay buffer.</summary>
+    /// <summary>Convert clip-space X → pixel X (top-left origin).</summary>
+    private int ClipToPixelX(float clipX) => (int)((clipX * 0.5f + 0.5f) * _uiCanvasW);
+    /// <summary>Convert clip-space Y → pixel Y (top-left origin, Y-flipped).</summary>
+    private int ClipToPixelY(float clipY, float clipH) => (int)((-clipY * 0.5f + 0.5f - clipH * 0.5f) * _uiCanvasH);
+    /// <summary>Convert clip-space width → pixel width.</summary>
+    private int ClipToPixelW(float clipW) => (int)(clipW * 0.5f * _uiCanvasW);
+    /// <summary>Convert clip-space height → pixel height.</summary>
+    private int ClipToPixelH(float clipH) => (int)(clipH * 0.5f * _uiCanvasH);
+
+    /// <summary>Draw a solid-color rectangle on the UI overlay canvas.</summary>
     public void DrawSolidQuad(float x, float y, float w, float h,
         float r, float g, float b, float a)
     {
-        if (_overlayBuffer == null || _solidFillKernel == null) return;
+        if (_uiCtx == null || _uiCanvasW == 0) return;
+        int px = ClipToPixelX(x);
+        int py = ClipToPixelY(y, h);
+        int pw = ClipToPixelW(w);
+        int ph = ClipToPixelH(h);
+        if (pw <= 0 || ph <= 0) return;
 
-        int canW = _canvas?.Width ?? 0;
-        int canH = _canvas?.Height ?? 0;
-        if (canW == 0 || canH == 0) return;
-
-        // Convert normalized coords to pixel coords
-        int px = (int)((x * 0.5f + 0.5f) * canW);
-        int py = (int)((-y * 0.5f + 0.5f - h * 0.5f) * canH);
-        int pw = (int)(w * 0.5f * canW);
-        int ph = (int)(h * 0.5f * canH);
-
-        _solidFillKernel((Index1D)(canW * canH), _overlayBuffer.View,
-            canW, canH, px, py, pw, ph, r, g, b, a);
+        _uiCtx.GlobalAlpha = a;
+        _uiCtx.FillStyle = $"rgb({(int)(r * 255)},{(int)(g * 255)},{(int)(b * 255)})";
+        _uiCtx.FillRect(px, py, pw, ph);
+        _uiCtx.GlobalAlpha = 1;
+        _uiDirty = true;
     }
 
-    /// <summary>Draw a vertical gradient rectangle on the overlay buffer.</summary>
+    /// <summary>Draw a vertical gradient rectangle on the UI overlay canvas.</summary>
     public void DrawGradientQuad(float x, float y, float w, float h,
         float topR, float topG, float topB, float topA,
         float botR, float botG, float botB, float botA)
     {
-        if (_overlayBuffer == null || _gradientFillKernel == null) return;
+        if (_uiCtx == null || _uiCanvasW == 0) return;
+        int px = ClipToPixelX(x);
+        int py = ClipToPixelY(y, h);
+        int pw = ClipToPixelW(w);
+        int ph = ClipToPixelH(h);
+        if (pw <= 0 || ph <= 0) return;
 
-        int canW = _canvas?.Width ?? 0;
-        int canH = _canvas?.Height ?? 0;
-        if (canW == 0 || canH == 0) return;
-
-        int px = (int)((x * 0.5f + 0.5f) * canW);
-        int py = (int)((-y * 0.5f + 0.5f - h * 0.5f) * canH);
-        int pw = (int)(w * 0.5f * canW);
-        int ph = (int)(h * 0.5f * canH);
-
-        _gradientFillKernel((Index1D)(canW * canH), _overlayBuffer.View,
-            canW, canH, px, py, pw, ph,
-            new ColorRGBA { R = topR, G = topG, B = topB, A = topA },
-            new ColorRGBA { R = botR, G = botG, B = botB, A = botA });
+        using var grad = _uiCtx.CreateLinearGradient(px, py, px, py + ph);
+        grad.AddColorStop(0, $"rgba({(int)(topR * 255)},{(int)(topG * 255)},{(int)(topB * 255)},{topA})");
+        grad.AddColorStop(1, $"rgba({(int)(botR * 255)},{(int)(botG * 255)},{(int)(botB * 255)},{botA})");
+        // Use JSRef.Set because FillStyle property is typed string, but Canvas 2D API accepts gradient objects
+        _uiCtx.JSRef!.Set("fillStyle", grad);
+        _uiCtx.FillRect(px, py, pw, ph);
+        _uiDirty = true;
     }
 
-    /// <summary>Draw a rounded rectangle on the overlay buffer.</summary>
+    /// <summary>Draw a rounded rectangle on the UI overlay canvas.</summary>
     public void DrawRoundedRect(float x, float y, float w, float h,
         float radius, float r, float g, float b, float a)
     {
-        if (_overlayBuffer == null || _roundedRectKernel == null) return;
+        if (_uiCtx == null || _uiCanvasW == 0) return;
+        int px = ClipToPixelX(x);
+        int py = ClipToPixelY(y, h);
+        int pw = ClipToPixelW(w);
+        int ph = ClipToPixelH(h);
+        float pr = radius * Math.Min(_uiCanvasW, _uiCanvasH) * 0.5f;
+        if (pw <= 0 || ph <= 0) return;
 
-        int canW = _canvas?.Width ?? 0;
-        int canH = _canvas?.Height ?? 0;
-        if (canW == 0 || canH == 0) return;
-
-        int px = (int)((x * 0.5f + 0.5f) * canW);
-        int py = (int)((-y * 0.5f + 0.5f - h * 0.5f) * canH);
-        int pw = (int)(w * 0.5f * canW);
-        int ph = (int)(h * 0.5f * canH);
-        float pr = radius * Math.Min(canW, canH) * 0.5f;
-
-        _roundedRectKernel((Index1D)(canW * canH), _overlayBuffer.View,
-            canW, canH, px, py, pw, ph, pr, r, g, b, a);
+        _uiCtx.GlobalAlpha = a;
+        _uiCtx.FillStyle = $"rgb({(int)(r * 255)},{(int)(g * 255)},{(int)(b * 255)})";
+        _uiCtx.BeginPath();
+        // Use arc-based rounded rect (roundRect may not be on all browsers)
+        float rx = px, ry = py, rw = pw, rh = ph, rr = Math.Min(pr, Math.Min(pw, ph) / 2f);
+        _uiCtx.MoveTo(rx + rr, ry);
+        _uiCtx.LineTo(rx + rw - rr, ry);
+        _uiCtx.ArcTo(rx + rw, ry, rx + rw, ry + rr, rr);
+        _uiCtx.LineTo(rx + rw, ry + rh - rr);
+        _uiCtx.ArcTo(rx + rw, ry + rh, rx + rw - rr, ry + rh, rr);
+        _uiCtx.LineTo(rx + rr, ry + rh);
+        _uiCtx.ArcTo(rx, ry + rh, rx, ry + rh - rr, rr);
+        _uiCtx.LineTo(rx, ry + rr);
+        _uiCtx.ArcTo(rx, ry, rx + rr, ry, rr);
+        _uiCtx.ClosePath();
+        _uiCtx.Fill();
+        _uiCtx.GlobalAlpha = 1;
+        _uiDirty = true;
     }
 
     // ── IUIRenderer overloads (float[] rect) ─────────────────────
@@ -882,7 +1596,15 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     /// <summary>Set the active output renderer by ID.</summary>
     public void SetActiveRenderer(string rendererId)
     {
+        if (_activeRendererId != rendererId)
+        {
+            // Different renderer may use different source buffer (flat2D mono reads _frameBuffer)
+            _cachedBufToTexBindGroup?.Dispose();
+            _cachedBufToTexBindGroup = null;
+        }
         _activeRendererId = rendererId;
+        if (_renderers.TryGetValue(rendererId, out var renderer))
+            _activeRenderer = renderer;
         // Renderer activation will happen in the render loop
     }
 
@@ -943,120 +1665,181 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     }
 
     /// <summary>
-    /// Draw text at the given clip-space center position.
-    /// Text is rendered to a 2D canvas, then composited onto the overlay buffer.
+    /// Draw text centered at the given clip-space position.
+    /// Draws directly to the UI overlay canvas (no per-text ILGPU buffers needed).
     /// </summary>
     public void DrawText(string text, float centerX, float centerY, int fontSize, string color, float opacity)
     {
-        if (_canvas == null || _textCtx == null || _textCanvas == null) return;
-
-        var entry = GetOrCreateTextEntry(text, fontSize, color);
-        if (entry == null) return;
-
-        var scale = Math.Min(1.0f, _canvas.Width * 0.8f / entry.Width);
-        var w = entry.Width * scale / _canvas.Width * 2f;
-        var h = entry.Height * scale / _canvas.Height * 2f;
-
-        // Composite text canvas pixels onto the overlay buffer at the given position
-        CompositeTextToOverlay(entry, centerX - w / 2f, centerY - h / 2f, w, h, opacity);
-    }
-
-    /// <summary>
-    /// Draw text at the given clip-space position (left-aligned).
-    /// Returns the width in clip-space units.
-    /// </summary>
-    public float DrawTextLeft(string text, float x, float y, float maxW, float maxH, int fontSize, string color, float opacity)
-    {
-        if (_canvas == null || _textCtx == null || _textCanvas == null) return 0;
-
-        var entry = GetOrCreateTextEntry(text, fontSize, color);
-        if (entry == null) return 0;
-
-        var aspect = (float)entry.Width / entry.Height;
-        var h = maxH;
-        var w = Math.Min(h * aspect * ((float)_canvas.Height / _canvas.Width), maxW);
-
-        CompositeTextToOverlay(entry, x, y, w, h, opacity);
-        return w;
-    }
-
-    private TextTexture? GetOrCreateTextEntry(string text, int fontSize, string color)
-    {
-        var key = $"{text}|{fontSize}|{color}";
-        if (_textCache.TryGetValue(key, out var cached) && cached.Buffer != null) return cached;
-
-        if (_textCtx == null || _textCanvas == null || _accelerator == null) return null;
+        if (_uiCtx == null || _uiCanvasW == 0) return;
 
         var dpr = _window.DevicePixelRatio;
         var scaledSize = (int)Math.Round(fontSize * dpr);
         var font = $"{scaledSize}px 'Inter', 'Segoe UI', sans-serif";
 
-        _textCtx.Font = font;
-        using var metrics = _textCtx.MeasureText(text);
-        var pad = 6;
-        var w = (int)Math.Ceiling(metrics.Width) + pad * 2;
-        var h = (int)Math.Ceiling(scaledSize * 1.5);
-        if (w <= 0 || h <= 0) return null;
+        // Measure to find centering offsets
+        _uiCtx.Font = font;
+        using var metrics = _uiCtx.MeasureText(text);
+        var textW = metrics.Width;
+        var textH = scaledSize;
 
-        _textCanvas.Width = w;
-        _textCanvas.Height = h;
+        // Convert clip-space center to pixel coords
+        int px = (int)((centerX * 0.5f + 0.5f) * _uiCanvasW - textW / 2);
+        int py = (int)((-centerY * 0.5f + 0.5f) * _uiCanvasH);
 
-        _textCtx.Font = font;
-        _textCtx.FillStyle = color;
-        _textCtx.TextBaseline = "middle";
-        _textCtx.TextAlign = "left";
-        _textCtx.TextRendering = "geometricPrecision";
-        _textCtx.FillText(text, pad, h / 2);
-
-        // Read text canvas pixels (RGBA byte[])
-        var bytes = _textCtx.GetImageBytes(0, 0, w, h);
-        if (bytes == null || bytes.Length == 0) return null;
-
-        // Pack RGBA bytes → uint[] (4 bytes per pixel → 1 uint per pixel)
-        var pixelCount = w * h;
-        var pixels = new uint[pixelCount];
-        for (int i = 0; i < pixelCount; i++)
-        {
-            int bi = i * 4;
-            pixels[i] = (uint)bytes[bi]
-                       | ((uint)bytes[bi + 1] << 8)
-                       | ((uint)bytes[bi + 2] << 16)
-                       | ((uint)bytes[bi + 3] << 24);
-        }
-
-        // Upload to ILGPU buffer
-        // Dispose old buffer if we're replacing a cached entry
-        cached?.Buffer?.Dispose();
-        var buffer = _accelerator.Allocate1D<uint>(pixelCount);
-        buffer.CopyFromCPU(pixels);
-
-        var entry = new TextTexture(w, h, buffer);
-        _textCache[key] = entry;
-        return entry;
+        _uiCtx.GlobalAlpha = opacity;
+        _uiCtx.Font = font;
+        _uiCtx.FillStyle = color;
+        _uiCtx.TextBaseline = "middle";
+        _uiCtx.TextAlign = "left";
+        _uiCtx.FillText(text, px, py);
+        _uiCtx.GlobalAlpha = 1;
+        _uiDirty = true;
     }
 
     /// <summary>
-    /// Composite a text entry onto the overlay buffer using the BlitScaled kernel.
-    /// Converts clip-space rect to pixel coords for the kernel.
+    /// Draw text left-aligned at the given clip-space position.
+    /// Returns the width in clip-space units.
     /// </summary>
-    private void CompositeTextToOverlay(TextTexture entry, float clipX, float clipY, float clipW, float clipH, float opacity)
+    public float DrawTextLeft(string text, float x, float y, float maxW, float maxH, int fontSize, string color, float opacity)
     {
-        if (_overlayBuffer == null || _blitScaledKernel == null || entry.Buffer == null) return;
+        if (_uiCtx == null || _uiCanvasW == 0 || _canvas == null) return 0;
 
-        int canW = _canvas?.Width ?? 0;
-        int canH = _canvas?.Height ?? 0;
-        if (canW == 0 || canH == 0) return;
+        var dpr = _window.DevicePixelRatio;
+        var scaledSize = (int)Math.Round(fontSize * dpr);
+        var font = $"{scaledSize}px 'Inter', 'Segoe UI', sans-serif";
 
-        // Convert clip-space [-1,+1] to pixel coordinates (top-left origin)
-        int dstX = (int)((clipX * 0.5f + 0.5f) * canW);
-        int dstY = (int)((-clipY * 0.5f + 0.5f - clipH * 0.5f) * canH);
-        int dstW = (int)(clipW * 0.5f * canW);
-        int dstH = (int)(clipH * 0.5f * canH);
-        if (dstW <= 0 || dstH <= 0) return;
+        int px = ClipToPixelX(x);
+        int py = ClipToPixelY(y, maxH);
+        int ph = ClipToPixelH(maxH);
 
-        _blitScaledKernel((Index1D)(canW * canH), _overlayBuffer.View, entry.Buffer.View,
-            canW, canH, entry.Width, entry.Height,
-            dstX, dstY, dstW, dstH, opacity);
+        _uiCtx.GlobalAlpha = opacity;
+        _uiCtx.Font = font;
+        _uiCtx.FillStyle = color;
+        _uiCtx.TextBaseline = "top";
+        _uiCtx.TextAlign = "left";
+        // Vertically center within the maxH region
+        int textY = py + (ph - scaledSize) / 2;
+        _uiCtx.FillText(text, px, textY);
+        _uiCtx.GlobalAlpha = 1;
+        _uiDirty = true;
+
+        // Return approximate width in clip-space
+        using var metrics = _uiCtx.MeasureText(text);
+        return (float)(metrics.Width / _canvas.Width * 2.0);
+    }
+
+    /// <summary>
+    /// Update the GPU texture with the current Canvas 2D content.
+    /// This is the expensive part (copyExternalImageToTexture) — called only on throttled frames.
+    /// </summary>
+    private void UpdateUITexture()
+    {
+        if (_uiCanvas == null || _uiCanvasW == 0 || _uiCanvasH == 0) return;
+        if (_device == null) return;
+
+        int w = _uiCanvasW;
+        int h = _uiCanvasH;
+
+        // Ensure UI overlay texture matches canvas dimensions
+        EnsureUIOverlayTexture(w, h);
+
+        // Copy Canvas 2D → GPU texture (GPU-native, zero-copy)
+        _device.Queue.CopyExternalImageToTexture(
+            new GPUCopyExternalImageSourceInfo { Source = _uiCanvas },
+            new GPUCopyExternalImageDestInfo { Texture = _uiOverlayTexture! },
+            new GPUExtent3DDict { Width = (uint)w, Height = (uint)h }
+        );
+
+        // Ensure bind group exists for the UI texture (cached — only recreate on resize)
+        if (_cachedUIOverlayBindGroup == null && _uiOverlayPipeline != null)
+        {
+            using var texView = _uiOverlayTexture!.CreateView();
+            _cachedUIOverlayBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
+            {
+                Layout = _uiOverlayPipeline.GetBindGroupLayout(0),
+                Entries = new[]
+                {
+                    new GPUBindGroupEntry { Binding = 0, Resource = _blitSampler! },
+                    new GPUBindGroupEntry { Binding = 1, Resource = texView },
+                }
+            });
+        }
+
+        // Clear the canvas for the next frame
+        _uiCtx!.ClearRect(0, 0, w, h);
+    }
+
+    /// <summary>
+    /// Composite the cached UI texture onto the swap chain via alpha-blend render pass.
+    /// Uses the active renderer's GetUIViewports() to determine how many viewports
+    /// and where to draw the UI (per-eye for stereo, full-screen for mono).
+    /// </summary>
+    private void CompositeUIToSwapChain(GPUTextureView swapView)
+    {
+        if (_device == null || _uiOverlayPipeline == null || _cachedUIOverlayBindGroup == null) return;
+
+        int canW = _canvas?.Width ?? 1;
+        int canH = _canvas?.Height ?? 1;
+
+        // Ask the active renderer where the UI should be drawn
+        var viewports = _activeRenderer?.GetUIViewports(canW, canH);
+
+        using var encoder = _device.CreateCommandEncoder();
+        using var pass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+        {
+            ColorAttachments = new[]
+            {
+                new GPURenderPassColorAttachment
+                {
+                    View = swapView,
+                    LoadOp = "load",   // Preserve existing video content
+                    StoreOp = "store",
+                }
+            }
+        });
+        pass.SetPipeline(_uiOverlayPipeline);
+        pass.SetBindGroup(0, _cachedUIOverlayBindGroup);
+
+        if (viewports != null && viewports.Length > 1)
+        {
+            // Multi-viewport: draw UI into each eye region
+            foreach (var vp in viewports)
+            {
+                pass.SetViewport(vp.X, vp.Y, vp.Width, vp.Height, 0, 1);
+                pass.Draw(3);
+            }
+        }
+        else
+        {
+            // Single full-screen draw (default for mono renderers)
+            pass.Draw(3);
+        }
+
+        pass.End();
+
+        using var cmd = encoder.Finish();
+        _device.Queue.Submit(new[] { cmd });
+    }
+
+    /// <summary>Ensure the UI overlay texture matches the required dimensions.</summary>
+    private void EnsureUIOverlayTexture(int w, int h)
+    {
+        if (_uiOverlayTexW == w && _uiOverlayTexH == h && _uiOverlayTexture != null) return;
+
+        _uiOverlayTexture?.Destroy();
+        _uiOverlayTexture?.Dispose();
+        _cachedUIOverlayBindGroup?.Dispose();
+        _cachedUIOverlayBindGroup = null;
+
+        _uiOverlayTexW = w;
+        _uiOverlayTexH = h;
+
+        _uiOverlayTexture = _device!.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { w, h },
+            Format = "rgba8unorm",
+            Usage = GPUTextureUsage.TextureBinding | GPUTextureUsage.CopyDst | GPUTextureUsage.RenderAttachment,
+        });
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -1079,14 +1862,24 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
         _overlayBuffer?.Dispose();
         _fftBuffer?.Dispose();
 
+        // Dispose cached bind groups
+        _cachedTexToBufBindGroup?.Dispose();
+        _cachedBufToTexBindGroup?.Dispose();
+        _cachedUIOverlayBindGroup?.Dispose();
+
         // Dispose WebGPU resources
         _outputTexture?.Destroy();
         _outputTexture?.Dispose();
         _videoCaptureTexture?.Destroy();
         _videoCaptureTexture?.Dispose();
+        _uiOverlayTexture?.Destroy();
+        _uiOverlayTexture?.Dispose();
         _blitSampler?.Dispose();
+        _videoCaptureSampler?.Dispose();
+        _blitDimsBuffer?.Dispose();
         _blitModule?.Dispose();
         _videoCaptureModule?.Dispose();
+        _uiOverlayModule?.Dispose();
         // Pipelines don't need explicit dispose in WebGPU — device cleanup handles it
 
         foreach (var r in _renderers.Values) r.Dispose();
@@ -1094,6 +1887,8 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
 
         _textCtx?.Dispose();
         _textCanvas?.Dispose();
+        _uiCtx?.Dispose();
+        _uiCanvas?.Dispose();
 
         // Dispose ILGPU
         _accelerator?.Dispose();
@@ -1113,5 +1908,8 @@ public class WGPURenderer : IUIRenderer, IAsyncDisposable
     }
 
     // ── Internal Types ────────────────────────────────────────────
-    private record TextTexture(int Width, int Height, MemoryBuffer1D<uint, Stride1D.Dense>? Buffer);
+    private record TextTexture(int Width, int Height, MemoryBuffer1D<uint, Stride1D.Dense>? Buffer)
+    {
+        public long LastUsedFrame { get; set; }
+    }
 }

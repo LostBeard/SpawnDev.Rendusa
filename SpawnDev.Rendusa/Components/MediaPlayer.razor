@@ -117,6 +117,10 @@
             await _renderer.InitializeAsync(_canvasRef);
             _renderer.OnFrame += OnRenderFrame;
 
+            // Share the renderer's ILGPU accelerator with the depth service (zero-copy pipeline)
+            if (_renderer.Accelerator != null)
+                DepthService.SetAccelerator(_renderer.Accelerator);
+
             // Initialize UI
             _ui = new WGPUPlayerUI(_renderer);
 
@@ -500,10 +504,10 @@
             _loadingImage = await HTMLImageElement.CreateFromImageAsync(url, "anonymous");
             _renderer.UploadImageTexture(_loadingImage);
 
-            // One-shot depth estimation for images
-            bool needsDepth = _outputRenderer != WGPUOutputRendererBase.Flat2DId
-                || (_renderer.RequiresDepthMap(_outputRenderer))
-                || _auto3dMode != Auto3DMode.Off;
+            // One-shot depth estimation for images — only if 3D mode needs it
+            bool need3D = _outputRenderer != WGPUOutputRendererBase.Flat2DId;
+            bool isDepthMode = _renderer.RequiresDepthMap(_outputRenderer);
+            bool needsDepth = (isDepthMode || _auto3dMode != Auto3DMode.Off) && need3D;
             if (needsDepth)
             {
                 await RunImageDepthEstimation(_loadingImage);
@@ -575,12 +579,11 @@
             using var ctx = canvas.Get2DContext();
             ctx.DrawImage(imageEl, 0, 0, depthW, depthH);
 
-            var depthFrame = await DepthService.EstimateAsync(canvas, _renderer.State.PerfStats);
-            if (depthFrame != null)
+            var depthResult = await DepthService.EstimateAsync(canvas, _renderer.State.PerfStats);
+            if (depthResult != null)
             {
-                _renderer.UploadDepthTexture(depthFrame.Width, depthFrame.Height, depthFrame.Data);
+                _renderer.SetDepthFromGpuView(depthResult.Width, depthResult.Height, depthResult.DepthBuffer);
                 _renderer.State.DepthReady = true;
-                depthFrame.Dispose();
             }
         }
         catch (Exception ex)
@@ -754,6 +757,18 @@
             case "4":
                 _ = CycleInputFormat();
                 break;
+            case "]":
+                Adjust3DLevel(0.05f);
+                break;
+            case "[":
+                Adjust3DLevel(-0.05f);
+                break;
+            case "}":
+                AdjustConvergence(0.05f);
+                break;
+            case "{":
+                AdjustConvergence(-0.05f);
+                break;
         }
     }
 
@@ -831,6 +846,12 @@
                 SettingsService.Settings.DepthEdgeThreshold = action.Value;
                 _ = InvokeAsync(async () => await SettingsService.SaveAsync());
                 PushStateToRenderer();
+                break;
+            case "3dlevel":
+                Set3DLevel((float)action.Value);
+                break;
+            case "convergence":
+                SetConvergence((float)action.Value);
                 break;
             case "outputformat":
                 // Legacy cycle fallback (shouldn't trigger now that popup is used)
@@ -917,6 +938,34 @@
         ApplyOutputFormat();
     }
 
+    private void Adjust3DLevel(float delta)
+    {
+        if (_renderer == null) return;
+        Set3DLevel(Math.Clamp(_renderer.State.DepthIntensity + delta, 0f, 1f));
+    }
+
+    private void Set3DLevel(float value)
+    {
+        if (_renderer == null) return;
+        _renderer.State.DepthIntensity = Math.Clamp(value, 0f, 1f);
+        SettingsService.Settings.Depth3D = _renderer.State.DepthIntensity;
+        _ = InvokeAsync(async () => await SettingsService.SaveAsync());
+    }
+
+    private void AdjustConvergence(float delta)
+    {
+        if (_renderer == null) return;
+        SetConvergence(Math.Clamp(_renderer.State.Convergence + delta, 0f, 1f));
+    }
+
+    private void SetConvergence(float value)
+    {
+        if (_renderer == null) return;
+        _renderer.State.Convergence = Math.Clamp(value, 0f, 1f);
+        SettingsService.Settings.Convergence3D = _renderer.State.Convergence;
+        _ = InvokeAsync(async () => await SettingsService.SaveAsync());
+    }
+
     /// <summary>Set output renderer from popup menu selection.</summary>
     private async Task SetOutputFormatFromPopup(string rendererId)
     {
@@ -961,18 +1010,23 @@
         bool shouldRun = (isDepthMode || _auto3dMode != Auto3DMode.Off) && need3D && _isPlaying
             && _renderer?.State.MediaType == MediaType.Video;
 
+        Console.WriteLine($"[DEPTH-GUARD] need3D={need3D} isDepthMode={isDepthMode} auto3D={_auto3dMode} outputRenderer='{_outputRenderer}' isPlaying={_isPlaying} mediaType={_renderer?.State.MediaType} shouldRun={shouldRun} loopRunning={_depthLoopRunning}");
+
         if (shouldRun && !_depthLoopRunning)
         {
+            Console.WriteLine("[DEPTH-GUARD] → Starting depth loop");
             StartDepthLoop();
         }
         else if (!shouldRun && _depthLoopRunning)
         {
+            Console.WriteLine("[DEPTH-GUARD] → Stopping depth loop");
             StopDepthLoop();
         }
     }
 
     private void StartDepthLoop()
     {
+        Console.WriteLine($"[DEPTH-GUARD] StartDepthLoop called (stack: {Environment.StackTrace.Split('\n')[1].Trim()})");
         StopDepthLoop();
         _depthCts = new CancellationTokenSource();
         _ = RunDepthLoop(_depthCts.Token);
@@ -984,6 +1038,13 @@
         _depthCts?.Dispose();
         _depthCts = null;
         _depthLoopRunning = false;
+        // Clear HUD depth stats when loop stops
+        if (_renderer != null)
+        {
+            _renderer.State.PerfStats.DepthActive = false;
+            _renderer.State.DepthReady = false;
+            _renderer.State.DepthProcessing = false;
+        }
     }
 
     /// <summary>
@@ -1041,11 +1102,11 @@
 
                     // Run depth estimation
                     _renderer.State.DepthProcessing = true;
-                    using var depthFrame = await DepthService.EstimateAsync(_depthCanvas, _renderer.State.PerfStats);
-                    if (depthFrame != null && !ct.IsCancellationRequested)
+                    var depthResult = await DepthService.EstimateAsync(_depthCanvas, _renderer.State.PerfStats);
+                    if (depthResult != null && !ct.IsCancellationRequested)
                     {
-                        // Upload depth map to GPU texture
-                        _renderer.UploadDepthTexture(depthFrame.Width, depthFrame.Height, depthFrame.Data);
+                        // GPU-to-GPU depth buffer transfer — no CPU round-trip
+                        _renderer.SetDepthFromGpuView(depthResult.Width, depthResult.Height, depthResult.DepthBuffer);
                         _renderer.State.DepthReady = true;
                         _renderer.State.DepthProcessing = false;
                         _renderer.Invalidate();

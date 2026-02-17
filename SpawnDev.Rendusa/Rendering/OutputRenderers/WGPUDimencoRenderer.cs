@@ -13,58 +13,66 @@ namespace SpawnDev.Rendusa.Rendering.OutputRenderers;
 public class WGPUDimencoRenderer : WGPUOutputRendererBase
 {
     private Action<Index1D, ArrayView<uint>, ArrayView<float>, ArrayView<uint>,
-        int, int, int, int>? _packDimencoKernel;
+        int, int, int, int, int, int>? _packDimencoKernel;
 
     private Action<Index1D, ArrayView<float>, ArrayView<uint>>? _depthGrayscaleKernel;
 
-    private Action<Index1D, ArrayView<uint>, ArrayView<uint>>? _copyKernel;
+    private Action<Index1D, ArrayView<uint>, ArrayView<uint>,
+        float, int, int, int, int>? _packSBSFlatDepthKernel;
 
     public WGPUDimencoRenderer(Accelerator accelerator) : base(accelerator) { }
 
     public override string DisplayName => "2D+Z (Dimenco)";
+    public override string ShortName => "2D+Z";
     public override string RendererId => TwoDPlusDepthId;
     public override bool RequiresDepthMap => true;
+
+    public override (int Width, int Height) GetOutputDimensions(int eyeWidth, int eyeHeight)
+        => (eyeWidth * 2, eyeHeight);
 
     protected override void InitializeKernels()
     {
         _packDimencoKernel = Accelerator.LoadAutoGroupedStreamKernel<
             Index1D, ArrayView<uint>, ArrayView<float>, ArrayView<uint>,
-            int, int, int, int>(RenderKernels.PackDimencoKernel);
+            int, int, int, int, int, int>(RenderKernels.PackDimencoKernel);
         Console.WriteLine("[WGPUDimencoRenderer] PackDimencoKernel compiled");
 
         _depthGrayscaleKernel = Accelerator.LoadAutoGroupedStreamKernel<
             Index1D, ArrayView<float>, ArrayView<uint>>(RenderKernels.DepthGrayscaleKernel);
         Console.WriteLine("[WGPUDimencoRenderer] DepthGrayscaleKernel compiled");
 
-        _copyKernel = Accelerator.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView<uint>, ArrayView<uint>>(RenderKernels.CopyBufferKernel);
+        _packSBSFlatDepthKernel = Accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<uint>, ArrayView<uint>,
+            float, int, int, int, int>(RenderKernels.PackSBSFlatDepthKernel);
     }
 
     public override void Render(ref RenderContext ctx, PlayerState state)
     {
-        // If no depth data, just copy source to output
+        int pixelCount = ctx.OutputWidth * ctx.OutputHeight;
+        if (pixelCount <= 0) return;
+
         if (ctx.Depth.Length == 0)
         {
-            if (_copyKernel != null)
+            // No depth: source left + solid gray at convergence plane right
+            if (_packSBSFlatDepthKernel != null)
             {
-                int pixelCount = ctx.EyeWidth * ctx.EyeHeight;
-                if (pixelCount > 0)
-                    _copyKernel((Index1D)pixelCount, ctx.LeftEye, ctx.Output);
+                _packSBSFlatDepthKernel((Index1D)pixelCount,
+                    ctx.LeftEye, ctx.Output,
+                    state.Convergence,
+                    ctx.EyeWidth, ctx.EyeHeight,
+                    ctx.OutputWidth, ctx.OutputHeight);
             }
             return;
         }
 
-        // Use PackDimencoKernel for combined SBS layout: content left + grayscale depth right
+        // Depth available: use PackDimencoKernel for combined SBS layout
         if (_packDimencoKernel != null)
         {
-            int pixelCount = ctx.OutputWidth * ctx.OutputHeight;
-            if (pixelCount > 0)
-            {
-                _packDimencoKernel((Index1D)pixelCount,
-                    ctx.LeftEye, ctx.Depth, ctx.Output,
-                    ctx.EyeWidth, ctx.EyeHeight,
-                    ctx.OutputWidth, ctx.OutputHeight);
-            }
+            _packDimencoKernel((Index1D)pixelCount,
+                ctx.LeftEye, ctx.Depth, ctx.Output,
+                ctx.EyeWidth, ctx.EyeHeight,
+                ctx.DepthWidth, ctx.DepthHeight,
+                ctx.OutputWidth, ctx.OutputHeight);
         }
     }
 
@@ -72,6 +80,6 @@ public class WGPUDimencoRenderer : WGPUOutputRendererBase
     {
         _packDimencoKernel = null;
         _depthGrayscaleKernel = null;
-        _copyKernel = null;
+        _packSBSFlatDepthKernel = null;
     }
 }

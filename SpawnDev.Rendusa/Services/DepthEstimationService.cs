@@ -1,6 +1,7 @@
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.BlazorJS.TransformersJS;
+using SpawnDev.BlazorJS.TransformersJS.ONNX;
 using System.Diagnostics;
 using ILGPU;
 using ILGPU.Runtime;
@@ -16,8 +17,8 @@ namespace SpawnDev.Rendusa.Services;
 /// Manages monocular depth estimation via TransformersJS (DepthAnything v2)
 /// with ILGPU GPU-accelerated normalization and temporal smoothing.
 ///
-/// Zero-copy pipeline: Float32Array from PredictedDepth tensor stays in JS.
-/// ILGPU kernels run on WebGPU backend. Output goes directly to texImage2D.
+/// Zero-copy pipeline: shares the renderer's ILGPU accelerator and returns
+/// a GPU-resident buffer view directly — no CPU round-trips for depth data.
 /// </summary>
 public class DepthEstimationService : IAsyncDisposable
 {
@@ -30,6 +31,7 @@ public class DepthEstimationService : IAsyncDisposable
     // ── ILGPU resources ──────────────────────────────────────────────
     private Context? _gpuContext;
     private Accelerator? _gpuAccelerator;
+    private bool _ownsAccelerator; // true when we created our own, false when shared
 
     // Buffers (resized when depth dimensions change)
     private MemoryBuffer1D<float, Stride1D.Dense>? _inputBuffer;
@@ -185,6 +187,18 @@ public class DepthEstimationService : IAsyncDisposable
             // Check WebGPU support for inference acceleration
             bool useWebGPU = !_js.IsUndefined("navigator.gpu?.requestAdapter");
 
+            // Share ILGPU's GPUDevice with ONNX Runtime so both use the same device.
+            // This enables future zero-copy GPU buffer sharing between ONNX output and ILGPU.
+            if (useWebGPU && _gpuAccelerator is WebGPUAccelerator webGpuAcc)
+            {
+                var nativeDevice = webGpuAcc.NativeAccelerator.NativeDevice;
+                if (nativeDevice != null)
+                {
+                    _js.Set($"{Transformers.GlobalModuleName}.env.backends.onnx.webgpu.device", nativeDevice);
+                    Console.WriteLine("[DepthService] Injected ILGPU GPUDevice into Transformers.env.backends.onnx.webgpu.device");
+                }
+            }
+
             using var onProgress = new ActionCallback<ModelLoadProgress>(OnProgress);
             _pipeline = await _transformers.DepthEstimationPipeline(Model, new PipelineOptions
             {
@@ -192,7 +206,7 @@ public class DepthEstimationService : IAsyncDisposable
                 OnProgress = onProgress,
             });
 
-            // Initialize ILGPU after pipeline is loaded
+            // Initialize ILGPU after pipeline is loaded (uses shared accelerator if set)
             await EnsureGpuAcceleratorAsync();
         }
         finally
@@ -202,6 +216,34 @@ public class DepthEstimationService : IAsyncDisposable
             OnStateChanged?.Invoke();
             _loadLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Set a shared ILGPU accelerator from the renderer.
+    /// Must be called before EnsurePipelineAsync or EstimateAsync.
+    /// The caller retains ownership — this service will NOT dispose it.
+    /// </summary>
+    public void SetAccelerator(Accelerator accelerator)
+    {
+        if (_gpuAccelerator == accelerator) return;
+
+        // Dispose our own accelerator/context if we created one
+        if (_ownsAccelerator)
+        {
+            _inputBuffer?.Dispose(); _inputBuffer = null;
+            _smoothedBuffer?.Dispose(); _smoothedBuffer = null;
+            _reductionBuffer?.Dispose(); _reductionBuffer = null;
+            _gpuAccelerator?.Dispose();
+            _gpuContext?.Dispose();
+            _gpuContext = null;
+            _bufW = 0; _bufH = 0;
+            _firstFrame = true;
+        }
+
+        _gpuAccelerator = accelerator;
+        _ownsAccelerator = false;
+        LoadKernels();
+        Console.WriteLine($"[DepthService] Using shared accelerator: {accelerator.Name}");
     }
 
     private void OnProgress(ModelLoadProgress progress)
@@ -241,6 +283,7 @@ public class DepthEstimationService : IAsyncDisposable
             if (devices.Count > 0)
             {
                 _gpuAccelerator = await devices[0].CreateAcceleratorAsync(_gpuContext);
+                _ownsAccelerator = true;
                 Console.WriteLine($"[DepthService] ILGPU initialized (WebGPU): {_gpuAccelerator.Name}");
                 LoadKernels();
                 return;
@@ -256,6 +299,7 @@ public class DepthEstimationService : IAsyncDisposable
         // Fallback to CPU
         _gpuContext = Context.Create().ToContext();
         _gpuAccelerator = _gpuContext.CreateCPUAccelerator(0);
+        _ownsAccelerator = true;
         Console.WriteLine($"[DepthService] ILGPU fallback: {_gpuAccelerator.Name}");
         LoadKernels();
     }
@@ -350,6 +394,14 @@ public class DepthEstimationService : IAsyncDisposable
             _transformers ??= await Transformers.Init();
             bool useWebGPU = !_js.IsUndefined("navigator.gpu?.requestAdapter");
 
+            // Re-inject device for the new pipeline
+            if (useWebGPU && _gpuAccelerator is WebGPUAccelerator webGpuAcc2)
+            {
+                var nativeDevice = webGpuAcc2.NativeAccelerator.NativeDevice;
+                if (nativeDevice != null)
+                    _js.Set($"{Transformers.GlobalModuleName}.env.backends.onnx.webgpu.device", nativeDevice);
+            }
+
             using var onProgress = new ActionCallback<ModelLoadProgress>(OnProgress);
             _pipeline = await _transformers.DepthEstimationPipeline(Model, new PipelineOptions
             {
@@ -386,9 +438,9 @@ public class DepthEstimationService : IAsyncDisposable
     /// Estimate depth from an OffscreenCanvas containing the current video frame.
     /// Uses PredictedDepth tensor (Float32Array) for full float precision.
     /// ILGPU kernel handles normalization + temporal smoothing on GPU.
-    /// Returns the processed depth data as a JS-resident Float32Array (0.0–1.0).
+    /// Returns a GPU-resident depth result — the buffer stays on the GPU.
     /// </summary>
-    public async Task<DepthFrame?> EstimateAsync(OffscreenCanvas frameCanvas, PerformanceStats? perfStats = null)
+    public async Task<GpuDepthResult?> EstimateAsync(OffscreenCanvas frameCanvas, PerformanceStats? perfStats = null)
     {
         if (_pipeline == null) return null;
 
@@ -414,33 +466,53 @@ public class DepthEstimationService : IAsyncDisposable
         if (predictedDepth == null)
         {
             Console.WriteLine("[DepthService] PredictedDepth is null — falling back to Depth.Data");
-            return EstimateFallback(result);
+            return await EstimateFallbackGpu(result);
         }
 
         var dims = predictedDepth.Dims; // [height, width]
         if (dims == null || dims.Length < 2)
         {
             Console.WriteLine($"[DepthService] PredictedDepth.Dims invalid: {dims?.Length ?? 0} dims");
-            return EstimateFallback(result);
+            return await EstimateFallbackGpu(result);
         }
 
         int h = (int)dims[0];
         int w = (int)dims[1];
         int len = w * h;
 
-        // Get the Float32Array data — may be null if tensor is on GPU
-        using var tensorF32 = predictedDepth.Get_Data<Float32Array>();
-        if (tensorF32 == null)
+        EnsureBuffers(w, h);
+        sw.Restart();
+
+        // ── Step 1: Load tensor data into ILGPU input buffer ──
+        // Phase 2: If the tensor is already on GPU (same device), do a
+        // GPU-to-GPU copy via copyBufferToBuffer — no CPU round-trip!
+        bool gpuCopyDone = false;
+        string tensorLocation = predictedDepth.Location;
+        Console.WriteLine($"[DepthService] PredictedDepth.Location = '{tensorLocation}'");
+        if (tensorLocation == "gpu-buffer" && _gpuAccelerator is WebGPUAccelerator webGpuAccForCopy)
         {
-            Console.WriteLine("[DepthService] PredictedDepth.data is null (tensor on GPU?) — falling back");
-            return EstimateFallback(result);
+            // The GPUBuffer lives on the underlying ORT tensor
+            using var ortTensor = predictedDepth.OrtTensor;
+            if (ortTensor != null)
+            {
+                using var srcGpuBuffer = ortTensor.GPUBuffer;
+                CopyGpuBufferToIlgpu(srcGpuBuffer, _inputBuffer!, webGpuAccForCopy);
+                Console.WriteLine($"[DepthService] GPU-to-GPU tensor copy ({len} floats, {len * 4} bytes)");
+                gpuCopyDone = true;
+            }
         }
 
-        EnsureBuffers(w, h);
-
-        // ── Step 1: Load tensor data into ILGPU input buffer (JS-to-JS) ──
-        sw.Restart();
-        LoadFloat32IntoBuffer(tensorF32, _inputBuffer!);
+        if (!gpuCopyDone)
+        {
+            // CPU fallback: read Float32Array and upload
+            using var tensorF32 = predictedDepth.Get_Data<Float32Array>();
+            if (tensorF32 == null)
+            {
+                Console.WriteLine("[DepthService] PredictedDepth.data is null — falling back");
+                return await EstimateFallbackGpu(result);
+            }
+            LoadFloat32IntoBuffer(tensorF32, _inputBuffer!);
+        }
 
         // ── Step 2: GPU reduction — find min and max ─────────────────────
         float globalMin = 0f;
@@ -480,8 +552,6 @@ public class DepthEstimationService : IAsyncDisposable
         await _gpuAccelerator.SynchronizeAsync();
         _firstFrame = false;
 
-        // ── Step 4: Read smoothed buffer as Float32Array (full precision) ──
-        var outputData = await ReadOutputAsFloat32Array(len);
         sw.Stop();
         float postMs = (float)sw.Elapsed.TotalMilliseconds;
 
@@ -492,30 +562,39 @@ public class DepthEstimationService : IAsyncDisposable
         if (perfStats != null)
             AutoAdjustQuality(perfStats.DepthFps);
 
-        return new DepthFrame(w, h, outputData);
+        // Return the GPU-resident buffer view directly — no CPU readback!
+        return new GpuDepthResult(w, h, _smoothedBuffer!);
     }
 
     /// <summary>
     /// Fallback: use the pre-quantized Depth.Data (Uint8Array) when PredictedDepth
     /// Float32Array is not accessible (e.g., tensor on GPU).
-    /// Converts to Float32Array [0.0–1.0] for consistency.
+    /// Uploads to GPU buffer for consistency with the GPU-resident path.
     /// </summary>
-    private DepthFrame? EstimateFallback(DepthEstimationResult result)
+    private async Task<GpuDepthResult?> EstimateFallbackGpu(DepthEstimationResult result)
     {
         using var depth = result.Depth;
         if (depth == null) return null;
+
+        int w = depth.Width;
+        int h = depth.Height;
+        int len = w * h;
+
         using var u8Data = depth.Data; // Uint8Array
-        // Convert Uint8Array [0–255] → Float32Array [0.0–1.0]
-        var len = u8Data.Length;
-        var floats = new float[len];
+        // Convert Uint8Array [0–255] → float[] [0.0–1.0]
         var bytes = u8Data.ReadBytes();
+        var floats = new float[len];
         for (int i = 0; i < len; i++)
             floats[i] = bytes[i] / 255f;
-        var f32 = new Float32Array(floats);
-        return new DepthFrame(depth.Width, depth.Height, f32);
+
+        EnsureBuffers(w, h);
+        // Upload to GPU (this is the fallback path, so CPU→GPU copy is expected)
+        _smoothedBuffer!.View.CopyFromCPU(floats);
+        await _gpuAccelerator!.SynchronizeAsync();
+        _firstFrame = false;
+
+        return new GpuDepthResult(w, h, _smoothedBuffer!);
     }
-
-
 
     /// <summary>
     /// Loads a JS Float32Array into an ILGPU buffer.
@@ -542,16 +621,29 @@ public class DepthEstimationService : IAsyncDisposable
         }
     }
 
-
-
     /// <summary>
-    /// Read the smoothed buffer as a JS Float32Array.
-    /// Values are normalized to 0.0–1.0.
+    /// Copy data from an ONNX output GPUBuffer directly into an ILGPU buffer
+    /// using WebGPU's copyBufferToBuffer command — pure GPU-to-GPU, no CPU.
+    /// Both buffers must reside on the same GPUDevice (ensured by device sharing).
     /// </summary>
-    private async Task<Float32Array> ReadOutputAsFloat32Array(int len)
+    private void CopyGpuBufferToIlgpu(
+        GPUBuffer srcGpuBuffer,
+        MemoryBuffer1D<float, Stride1D.Dense> dest,
+        WebGPUAccelerator accelerator)
     {
-        var floatData = await _smoothedBuffer!.CopyToHostAsync<float>();
-        return new Float32Array(floatData);
+        var destBuf = ((IArrayView)dest).Buffer as WebGPUMemoryBuffer;
+        if (destBuf == null)
+            throw new InvalidOperationException("Destination buffer is not a WebGPU buffer");
+
+        var dstGpuBuffer = destBuf.NativeBuffer.NativeBuffer!;
+        long byteLength = dest.Length * sizeof(float);
+
+        // Use the ILGPU accelerator's device to create a command encoder
+        var device = accelerator.NativeAccelerator.NativeDevice!;
+        using var encoder = device.CreateCommandEncoder();
+        encoder.CopyBufferToBuffer(srcGpuBuffer, 0, dstGpuBuffer, 0, (ulong)byteLength);
+        using var commandBuffer = encoder.Finish();
+        accelerator.NativeAccelerator.Queue!.Submit(new[] { commandBuffer });
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -653,20 +745,18 @@ public class DepthEstimationService : IAsyncDisposable
         _inputBuffer?.Dispose();
         _smoothedBuffer?.Dispose();
         _reductionBuffer?.Dispose();
-        _gpuAccelerator?.Dispose();
-        _gpuContext?.Dispose();
+        if (_ownsAccelerator)
+        {
+            _gpuAccelerator?.Dispose();
+            _gpuContext?.Dispose();
+        }
         _pipeline?.Dispose();
     }
 }
 
 /// <summary>
-/// Holds the depth estimation result for one frame.
-/// The caller is responsible for disposing <see cref="Data"/>.
+/// GPU-resident depth estimation result.
+/// The buffer view is owned by DepthEstimationService — do NOT dispose it.
+/// It remains valid until the next EstimateAsync call or service disposal.
 /// </summary>
-public record DepthFrame(int Width, int Height, Float32Array Data) : IDisposable
-{
-    public void Dispose()
-    {
-        Data?.Dispose();
-    }
-}
+public record GpuDepthResult(int Width, int Height, MemoryBuffer1D<float, Stride1D.Dense> DepthBuffer);

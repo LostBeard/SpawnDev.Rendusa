@@ -19,6 +19,7 @@ public class WGPUAnaglyphRenderer : WGPUOutputRendererBase
     public WGPUAnaglyphRenderer(Accelerator accelerator) : base(accelerator) { }
 
     public override string DisplayName => "Anaglyph";
+    public override string ShortName => "Ana";
     public override string RendererId => AnaglyphId;
     public override int RequiredViewCount => 2;
 

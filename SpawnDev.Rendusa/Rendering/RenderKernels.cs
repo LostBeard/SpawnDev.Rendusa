@@ -436,7 +436,7 @@ public static class RenderKernels
 
     /// <summary>
     /// Fill a rectangular region with a solid color (with alpha compositing).
-    /// Rect is in pixel coordinates: rectX, rectY, rectW, rectH.
+    /// Dispatch size = rectW * rectH (rect-local indexing).
     /// </summary>
     public static void SolidFillKernel(
         Index1D index,
@@ -445,21 +445,22 @@ public static class RenderKernels
         int rectX, int rectY, int rectW, int rectH,
         float r, float g, float b, float a)
     {
-        int px = index % bufW;
-        int py = index / bufW;
+        // Rect-local index → buffer pixel
+        int lx = index % rectW;
+        int ly = index / rectW;
+        int px = rectX + lx;
+        int py = rectY + ly;
+        if (px < 0 || px >= bufW || py < 0 || py >= bufH) return;
 
-        // Skip pixels outside the rect
-        if (px < rectX || px >= rectX + rectW || py < rectY || py >= rectY + rectH)
-            return;
-
+        int bufIdx = py * bufW + px;
         if (a >= 0.999f)
         {
-            buffer[index] = PackRGBA(r, g, b, 1f);
+            buffer[bufIdx] = PackRGBA(r, g, b, 1f);
         }
         else
         {
             // Alpha composite: over operator
-            uint existing = buffer[index];
+            uint existing = buffer[bufIdx];
             float er = UnpackR(existing);
             float eg = UnpackG(existing);
             float eb = UnpackB(existing);
@@ -468,12 +469,13 @@ public static class RenderKernels
             float outR = (r * a + er * ea * (1f - a)) / (outA + 0.001f);
             float outG = (g * a + eg * ea * (1f - a)) / (outA + 0.001f);
             float outB = (b * a + eb * ea * (1f - a)) / (outA + 0.001f);
-            buffer[index] = PackRGBA(outR, outG, outB, outA);
+            buffer[bufIdx] = PackRGBA(outR, outG, outB, outA);
         }
     }
 
     /// <summary>
     /// Fill a rectangular region with a vertical gradient (top color → bottom color).
+    /// Dispatch size = rectW * rectH (rect-local indexing).
     /// </summary>
     public static void GradientFillKernel(
         Index1D index,
@@ -482,20 +484,22 @@ public static class RenderKernels
         int rectX, int rectY, int rectW, int rectH,
         ColorRGBA topColor, ColorRGBA botColor)
     {
-        int px = index % bufW;
-        int py = index / bufW;
+        // Rect-local index → buffer pixel
+        int lx = index % rectW;
+        int ly = index / rectW;
+        int px = rectX + lx;
+        int py = rectY + ly;
+        if (px < 0 || px >= bufW || py < 0 || py >= bufH) return;
 
-        if (px < rectX || px >= rectX + rectW || py < rectY || py >= rectY + rectH)
-            return;
-
-        float t = (py - rectY) / (float)(rectH - 1);
+        int bufIdx = py * bufW + px;
+        float t = ly / (float)(rectH - 1);
         float r = topColor.R + (botColor.R - topColor.R) * t;
         float g = topColor.G + (botColor.G - topColor.G) * t;
         float b = topColor.B + (botColor.B - topColor.B) * t;
         float a = topColor.A + (botColor.A - topColor.A) * t;
 
         // Alpha composite
-        uint existing = buffer[index];
+        uint existing = buffer[bufIdx];
         float er = UnpackR(existing);
         float eg = UnpackG(existing);
         float eb = UnpackB(existing);
@@ -504,11 +508,12 @@ public static class RenderKernels
         float outR = (r * a + er * ea * (1f - a)) / (outA + 0.001f);
         float outG = (g * a + eg * ea * (1f - a)) / (outA + 0.001f);
         float outB = (b * a + eb * ea * (1f - a)) / (outA + 0.001f);
-        buffer[index] = PackRGBA(outR, outG, outB, outA);
+        buffer[bufIdx] = PackRGBA(outR, outG, outB, outA);
     }
 
     /// <summary>
     /// SDF-based rounded rectangle fill with anti-aliased edges.
+    /// Dispatch size = rectW * rectH (rect-local indexing).
     /// </summary>
     public static void RoundedRectKernel(
         Index1D index,
@@ -518,15 +523,18 @@ public static class RenderKernels
         float radius,
         float r, float g, float b, float a)
     {
-        int px = index % bufW;
-        int py = index / bufW;
+        // Rect-local index → buffer pixel
+        int lx = index % rectW;
+        int ly = index / rectW;
+        int px = rectX + lx;
+        int py = rectY + ly;
+        if (px < 0 || px >= bufW || py < 0 || py >= bufH) return;
 
-        if (px < rectX || px >= rectX + rectW || py < rectY || py >= rectY + rectH)
-            return;
+        int bufIdx = py * bufW + px;
 
-        // SDF for rounded rect
-        float localX = px - rectX - rectW * 0.5f;
-        float localY = py - rectY - rectH * 0.5f;
+        // SDF for rounded rect (using local coords directly)
+        float localX = lx - rectW * 0.5f;
+        float localY = ly - rectH * 0.5f;
         float halfW = rectW * 0.5f - radius;
         float halfH = rectH * 0.5f - radius;
         float qx = (localX > 0 ? localX : -localX) - halfW;
@@ -535,9 +543,6 @@ public static class RenderKernels
         float clampedMaxQ = maxQ < 0f ? maxQ : 0f;
         float posQx = qx > 0f ? qx : 0f;
         float posQy = qy > 0f ? qy : 0f;
-        float lenQ = (float)Math.Abs(posQx * posQx + posQy * posQy);
-        // Use sqrt approximation (since we can't use Math.Sqrt in ILGPU easily)
-        // Actually let's use a simple AA without sqrt for now
         float d = clampedMaxQ + posQx + posQy - radius; // simplified SDF
 
         // Anti-aliasing: smooth transition over ~1 pixel
@@ -550,7 +555,7 @@ public static class RenderKernels
         if (finalA < 0.001f) return;
 
         // Alpha composite
-        uint existing = buffer[index];
+        uint existing = buffer[bufIdx];
         float er = UnpackR(existing);
         float eg = UnpackG(existing);
         float eb = UnpackB(existing);
@@ -559,7 +564,7 @@ public static class RenderKernels
         float outR = (r * finalA + er * ea * (1f - finalA)) / (outA + 0.001f);
         float outG = (g * finalA + eg * ea * (1f - finalA)) / (outA + 0.001f);
         float outB = (b * finalA + eb * ea * (1f - finalA)) / (outA + 0.001f);
-        buffer[index] = PackRGBA(outR, outG, outB, outA);
+        buffer[bufIdx] = PackRGBA(outR, outG, outB, outA);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -638,6 +643,7 @@ public static class RenderKernels
     /// Copy a source texture buffer into a region of the destination buffer,
     /// scaling via nearest-neighbor sampling. Used for blitting textures
     /// (text renders, images) into the compositing buffer.
+    /// Dispatch size = dstRectW * dstRectH (rect-local indexing).
     /// </summary>
     public static void BlitScaledKernel(
         Index1D index,
@@ -648,16 +654,18 @@ public static class RenderKernels
         int dstX, int dstY, int dstRectW, int dstRectH,
         float opacity)
     {
-        int dx = index % destW;
-        int dy = index / destW;
+        // Rect-local index → dest pixel
+        int lx = index % dstRectW;
+        int ly = index / dstRectW;
+        int dx = dstX + lx;
+        int dy = dstY + ly;
+        if (dx < 0 || dx >= destW || dy < 0 || dy >= destH) return;
 
-        // Inside blit rect?
-        if (dx < dstX || dx >= dstX + dstRectW || dy < dstY || dy >= dstY + dstRectH)
-            return;
+        int destIdx = dy * destW + dx;
 
         // Map to source UV
-        float u = (dx - dstX) / (float)dstRectW;
-        float v = (dy - dstY) / (float)dstRectH;
+        float u = lx / (float)dstRectW;
+        float v = ly / (float)dstRectH;
         int sx = (int)(u * (srcW - 1));
         int sy = (int)(v * (srcH - 1));
         if (sx < 0) sx = 0; if (sx >= srcW) sx = srcW - 1;
@@ -671,7 +679,7 @@ public static class RenderKernels
         float sg = UnpackG(srcPx);
         float sb = UnpackB(srcPx);
 
-        uint dstPx = dest[index];
+        uint dstPx = dest[destIdx];
         float dr = UnpackR(dstPx);
         float dg = UnpackG(dstPx);
         float db = UnpackB(dstPx);
@@ -681,7 +689,7 @@ public static class RenderKernels
         float outR = (sr * sa + dr * da * (1f - sa)) / (outA + 0.001f);
         float outG = (sg * sa + dg * da * (1f - sa)) / (outA + 0.001f);
         float outB = (sb * sa + db * da * (1f - sa)) / (outA + 0.001f);
-        dest[index] = PackRGBA(outR, outG, outB, outA);
+        dest[destIdx] = PackRGBA(outR, outG, outB, outA);
     }
 
     /// <summary>
@@ -770,6 +778,7 @@ public static class RenderKernels
     /// <summary>
     /// Dimenco-style depth packing: left half = content, right half = grayscale depth.
     /// Layout matches Dimenco autostereoscopic display requirements.
+    /// depthW/depthH are the actual depth buffer dimensions (may differ from content dims).
     /// </summary>
     public static void PackDimencoKernel(
         Index1D index,
@@ -777,6 +786,7 @@ public static class RenderKernels
         ArrayView<float> depth,
         ArrayView<uint> output,
         int contentW, int contentH,
+        int depthW, int depthH,
         int outW, int outH)
     {
         int ox = index % outW;
@@ -794,15 +804,111 @@ public static class RenderKernels
         }
         else
         {
-            // Right half: depth as grayscale
-            int srcX = (ox - halfW) * contentW / halfW;
-            int srcY = oy * contentH / outH;
-            if (srcX >= contentW) srcX = contentW - 1;
-            if (srcY >= contentH) srcY = contentH - 1;
-            float d = depth[srcY * contentW + srcX];
+            // Right half: depth as grayscale (sample at depth buffer resolution)
+            float u = (ox - halfW) / (float)halfW;
+            float v = oy / (float)outH;
+            int dx = (int)(u * (depthW - 1));
+            int dy = (int)(v * (depthH - 1));
+            if (dx < 0) dx = 0; if (dx >= depthW) dx = depthW - 1;
+            if (dy < 0) dy = 0; if (dy >= depthH) dy = depthH - 1;
+            float d = depth[dy * depthW + dx];
             if (d < 0f) d = 0f;
             if (d > 1f) d = 1f;
             output[index] = PackRGBA(d, d, d, 1f);
+        }
+    }
+    /// <summary>
+    /// SBS layout with no depth data: source on left half,
+    /// solid gray at the given depth value on right half.
+    /// Used as fallback when depth map is unavailable.
+    /// </summary>
+    public static void PackSBSFlatDepthKernel(
+        Index1D index,
+        ArrayView<uint> source,
+        ArrayView<uint> output,
+        float flatDepthValue,
+        int sourceW, int sourceH,
+        int outW, int outH)
+    {
+        int ox = index % outW;
+        int oy = index / outW;
+        int halfW = outW / 2;
+
+        if (ox < halfW)
+        {
+            // Left half: source content
+            int srcX = ox * sourceW / halfW;
+            int srcY = oy * sourceH / outH;
+            if (srcX >= sourceW) srcX = sourceW - 1;
+            if (srcY >= sourceH) srcY = sourceH - 1;
+            output[index] = source[srcY * sourceW + srcX];
+        }
+        else
+        {
+            // Right half: solid gray at convergence plane
+            output[index] = PackRGBA(flatDepthValue, flatDepthValue, flatDepthValue, 1f);
+        }
+    }
+
+    /// <summary>
+    /// SBS layout: source on left half, turbo colormap depth visualization on right half.
+    /// Used by Depth Preview renderer for side-by-side source + colormap display.
+    /// depthW/depthH are the actual depth buffer dimensions (may differ from source dims).
+    /// </summary>
+    public static void PackSBSColormapKernel(
+        Index1D index,
+        ArrayView<uint> source,
+        ArrayView<float> depth,
+        ArrayView<uint> output,
+        int sourceW, int sourceH,
+        int depthW, int depthH,
+        int outW, int outH)
+    {
+        int ox = index % outW;
+        int oy = index / outW;
+        int halfW = outW / 2;
+
+        if (ox < halfW)
+        {
+            // Left half: source content
+            int srcX = ox * sourceW / halfW;
+            int srcY = oy * sourceH / outH;
+            if (srcX >= sourceW) srcX = sourceW - 1;
+            if (srcY >= sourceH) srcY = sourceH - 1;
+            output[index] = source[srcY * sourceW + srcX];
+        }
+        else
+        {
+            // Right half: depth as turbo colormap (sample at depth buffer resolution)
+            float u = (ox - halfW) / (float)halfW;
+            float v = oy / (float)outH;
+            int dx = (int)(u * (depthW - 1));
+            int dy = (int)(v * (depthH - 1));
+            if (dx < 0) dx = 0; if (dx >= depthW) dx = depthW - 1;
+            if (dy < 0) dy = 0; if (dy >= depthH) dy = depthH - 1;
+
+            float t = depth[dy * depthW + dx];
+            if (t < 0f) t = 0f;
+            if (t > 1f) t = 1f;
+
+            float idx = t * 31f;
+            int lo = (int)idx;
+            if (lo < 0) lo = 0;
+            if (lo > 31) lo = 31;
+            int hi = lo + 1;
+            if (hi > 31) hi = 31;
+            float frac = idx - lo;
+
+            float loR = 0f, loG = 0f, loB = 0f;
+            float hiR = 0f, hiG = 0f, hiB = 0f;
+            TurboLUT(lo, ref loR, ref loG, ref loB);
+            TurboLUT(hi, ref hiR, ref hiG, ref hiB);
+
+            float r = loR + (hiR - loR) * frac;
+            float g = loG + (hiG - loG) * frac;
+            float b = loB + (hiB - loB) * frac;
+
+            output[index] = PackRGBA(r, g, b, 1f);
         }
     }
 }

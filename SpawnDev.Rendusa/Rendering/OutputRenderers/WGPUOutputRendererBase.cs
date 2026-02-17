@@ -5,6 +5,11 @@ using SpawnDev.Rendusa.Models;
 namespace SpawnDev.Rendusa.Rendering.OutputRenderers;
 
 /// <summary>
+/// Defines a viewport region on the swap chain where the UI overlay should be composited.
+/// </summary>
+public readonly record struct UIViewport(float X, float Y, float Width, float Height);
+
+/// <summary>
 /// Render context passed from WGPURenderer to the active output renderer.
 /// Contains all ILGPU buffer views and dimensions needed for compositing.
 /// </summary>
@@ -24,6 +29,9 @@ public struct RenderContext
 
     /// <summary>Per-eye dimensions in pixels.</summary>
     public int EyeWidth, EyeHeight;
+
+    /// <summary>Depth buffer dimensions (may differ from eye dims due to DepthScale).</summary>
+    public int DepthWidth, DepthHeight;
 
     /// <summary>Output buffer dimensions in pixels.</summary>
     public int OutputWidth, OutputHeight;
@@ -66,6 +74,9 @@ public abstract class WGPUOutputRendererBase : IDisposable
     /// <summary>Human-readable name for UI menus.</summary>
     public abstract string DisplayName { get; }
 
+    /// <summary>Compact name for UI buttons (4-5 chars max). Defaults to DisplayName.</summary>
+    public virtual string ShortName => DisplayName;
+
     /// <summary>Unique string identifier for this renderer.</summary>
     public abstract string RendererId { get; }
 
@@ -81,6 +92,23 @@ public abstract class WGPUOutputRendererBase : IDisposable
 
     /// <summary>True if this renderer always requires a depth map.</summary>
     public virtual bool RequiresDepthMap => false;
+
+    /// <summary>
+    /// Returns the viewport regions where UI overlays should be composited.
+    /// Each viewport represents one eye region on the swap chain.
+    /// Default: single full-screen viewport (2D, Anaglyph, etc.)
+    /// Override for stereo layouts (SBS → two halves, OU → two halves, etc.)
+    /// </summary>
+    public virtual UIViewport[] GetUIViewports(int canvasWidth, int canvasHeight)
+        => new[] { new UIViewport(0, 0, canvasWidth, canvasHeight) };
+
+    /// <summary>
+    /// Returns the output buffer dimensions this renderer needs, given per-eye dimensions.
+    /// Default: same as eye dimensions (1:1 mapping).
+    /// Override for renderers that pack multiple views (SBS = 2x width, OU = 2x height, etc.)
+    /// </summary>
+    public virtual (int Width, int Height) GetOutputDimensions(int eyeWidth, int eyeHeight)
+        => (eyeWidth, eyeHeight);
 
     /// <summary>Check if this renderer can currently produce output.</summary>
     public virtual bool CanRender() => true;

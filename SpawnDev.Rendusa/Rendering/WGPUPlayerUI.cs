@@ -225,7 +225,7 @@ public class WGPUPlayerUI
 
         // Output Format (3D toggle) — cycles through registered renderers
         rx -= ButtonSize + Padding * 0.5f;
-        var fmtIcon = _renderer.ActiveRenderer?.DisplayName ?? "2D";
+        var fmtIcon = _renderer.ActiveRenderer?.ShortName ?? "2D";
         _buttons.Add(new UIButton { Id = "outputformat", Icon = fmtIcon, X = rx, Y = y, Width = ButtonSize, Height = ButtonSize, Active = state.OutputRenderer != WGPUOutputRendererBase.Flat2DId, Opacity = _opacity });
         _outputFormatBtnX = rx;
 
@@ -549,6 +549,22 @@ public class WGPUPlayerUI
 
     private void BuildDepthTab(PlayerState state)
     {
+        // ── 3D Adjustments (always visible) ──────────────────────
+        _settingsPanel!.Add(new UISlider
+        {
+            Id = "3dlevel", Label = "3D Level",
+            GetValue = () => state.DepthIntensity,
+            GetDisplayText = () => $"{(int)(state.DepthIntensity * 100)}%"
+        });
+
+        _settingsPanel.Add(new UISlider
+        {
+            Id = "convergence", Label = "Convergence",
+            GetValue = () => state.Convergence,
+            GetDisplayText = () => $"{(int)(state.Convergence * 100)}%"
+        });
+
+        // ── Depth Estimation Settings ────────────────────────────
         // Model dropdown
         string modelLabel = "Unknown";
         foreach (var (id, label) in DepthEstimationService.AvailableModels)
@@ -656,16 +672,20 @@ public class WGPUPlayerUI
             new[] { bgX, bgY, bgW, bgH },
             0.04f, 0.04f, 0.06f, 0.80f * hudOpacity, 0.015f);
 
-        // FPS line
+        // FPS line — quantize display values to reduce text cache churn
         float lineH = 0.025f;
         float cy = y;
 
+        // Snap FPS to nearest 5 (or integer if < 10) to avoid per-frame cache misses
+        int fpsDisplay = stats.Fps < 10 ? (int)Math.Round(stats.Fps) : (int)(Math.Round(stats.Fps / 5.0) * 5);
         string fpsColor = stats.Fps >= 50 ? "#4caf50" : stats.Fps >= 30 ? "#ffc107" : "#f44336";
-        _renderer.DrawTextLeft($"FPS: {stats.Fps:F0}",
+        _renderer.DrawTextLeft($"FPS: {fpsDisplay}",
             x * 2f - 1f, cy * 2f - 1f, w * 2f, lineH * 2f, 13, fpsColor, hudOpacity);
         cy -= lineH;
 
-        _renderer.DrawTextLeft($"Frame: {stats.FrameTimeMs:F1} ms",
+        // Snap frame time to nearest integer to minimize unique text strings
+        int frameDisplay = (int)Math.Round(stats.FrameTimeMs);
+        _renderer.DrawTextLeft($"Frame: {frameDisplay} ms",
             x * 2f - 1f, cy * 2f - 1f, w * 2f, lineH * 2f, 12, "#b0bec5", hudOpacity * 0.9f);
         cy -= lineH;
 
@@ -678,15 +698,15 @@ public class WGPUPlayerUI
                 0.3f, 0.3f, 0.4f, 0.5f * hudOpacity, 1f);
             cy -= 0.008f;
 
-            _renderer.DrawTextLeft($"Depth: {stats.DepthTotalMs:F0} ms ({stats.DepthResolution})",
+            _renderer.DrawTextLeft($"Depth: {(int)Math.Round(stats.DepthTotalMs)} ms ({stats.DepthResolution})",
                 x * 2f - 1f, cy * 2f - 1f, w * 2f, lineH * 2f, 12, "#80cbc4", hudOpacity);
             cy -= lineH;
 
-            _renderer.DrawTextLeft($"  Inference: {stats.DepthInferenceMs:F0} ms",
+            _renderer.DrawTextLeft($"  Inference: {(int)Math.Round(stats.DepthInferenceMs)} ms",
                 x * 2f - 1f, cy * 2f - 1f, w * 2f, lineH * 2f, 11, "#90a4ae", hudOpacity * 0.85f);
             cy -= lineH;
 
-            _renderer.DrawTextLeft($"  GPU Post:  {stats.DepthPostMs:F0} ms",
+            _renderer.DrawTextLeft($"  GPU Post:  {(int)Math.Round(stats.DepthPostMs)} ms",
                 x * 2f - 1f, cy * 2f - 1f, w * 2f, lineH * 2f, 11, "#90a4ae", hudOpacity * 0.85f);
             cy -= lineH;
 

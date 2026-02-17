@@ -18,8 +18,22 @@ public class WGPUSBSRenderer : WGPUOutputRendererBase
     public WGPUSBSRenderer(Accelerator accelerator) : base(accelerator) { }
 
     public override string DisplayName => "Side-by-Side";
+    public override string ShortName => "SBS";
     public override string RendererId => SideBySideId;
     public override int RequiredViewCount => 2;
+
+    public override UIViewport[] GetUIViewports(int canvasWidth, int canvasHeight)
+    {
+        float halfW = canvasWidth / 2f;
+        return new[]
+        {
+            new UIViewport(0, 0, halfW, canvasHeight),
+            new UIViewport(halfW, 0, halfW, canvasHeight),
+        };
+    }
+
+    public override (int Width, int Height) GetOutputDimensions(int eyeWidth, int eyeHeight)
+        => (eyeWidth * 2, eyeHeight);
 
     protected override void InitializeKernels()
     {

@@ -18,8 +18,22 @@ public class WGPUOURenderer : WGPUOutputRendererBase
     public WGPUOURenderer(Accelerator accelerator) : base(accelerator) { }
 
     public override string DisplayName => "Over-Under";
+    public override string ShortName => "OU";
     public override string RendererId => OverUnderId;
     public override int RequiredViewCount => 2;
+
+    public override UIViewport[] GetUIViewports(int canvasWidth, int canvasHeight)
+    {
+        float halfH = canvasHeight / 2f;
+        return new[]
+        {
+            new UIViewport(0, 0, canvasWidth, halfH),
+            new UIViewport(0, halfH, canvasWidth, halfH),
+        };
+    }
+
+    public override (int Width, int Height) GetOutputDimensions(int eyeWidth, int eyeHeight)
+        => (eyeWidth, eyeHeight * 2);
 
     protected override void InitializeKernels()
     {

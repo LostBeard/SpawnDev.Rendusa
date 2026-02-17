@@ -5,60 +5,73 @@ using SpawnDev.Rendusa.Models;
 namespace SpawnDev.Rendusa.Rendering.OutputRenderers;
 
 /// <summary>
-/// 2D+Z (Depth Preview) output renderer. Draws the original frame on the
+/// Depth Preview output renderer. Draws the original frame on the
 /// left half and a turbo-colormap visualization of the depth map on the right half.
-///
-/// Owns and manages the DepthColormapKernel delegate.
-/// Uses BlitScaledKernel (shared) for compositing source to the left half,
-/// and DepthColormapKernel for the right half visualization.
+/// When no depth data is available, shows source left + solid color at convergence plane right.
 /// </summary>
 public class WGPUDepthPreviewRenderer : WGPUOutputRendererBase
 {
-    private Action<Index1D, ArrayView<float>, ArrayView<uint>>? _depthColormapKernel;
-    private Action<Index1D, ArrayView<uint>, ArrayView<uint>>? _copyKernel;
+    private Action<Index1D, ArrayView<uint>, ArrayView<float>, ArrayView<uint>,
+        int, int, int, int, int, int>? _packSBSColormapKernel;
+
+    private Action<Index1D, ArrayView<uint>, ArrayView<uint>,
+        float, int, int, int, int>? _packSBSFlatDepthKernel;
 
     public WGPUDepthPreviewRenderer(Accelerator accelerator) : base(accelerator) { }
 
     public override string DisplayName => "Depth-Preview";
+    public override string ShortName => "Depth";
     public override string RendererId => DepthPreviewId;
     public override bool RequiresDepthMap => true;
 
+    public override (int Width, int Height) GetOutputDimensions(int eyeWidth, int eyeHeight)
+        => (eyeWidth * 2, eyeHeight);
+
     protected override void InitializeKernels()
     {
-        _depthColormapKernel = Accelerator.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView<float>, ArrayView<uint>>(RenderKernels.DepthColormapKernel);
-        Console.WriteLine("[WGPUDepthPreviewRenderer] DepthColormapKernel compiled");
+        _packSBSColormapKernel = Accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<uint>, ArrayView<float>, ArrayView<uint>,
+            int, int, int, int, int, int>(RenderKernels.PackSBSColormapKernel);
+        Console.WriteLine("[WGPUDepthPreviewRenderer] PackSBSColormapKernel compiled");
 
-        _copyKernel = Accelerator.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView<uint>, ArrayView<uint>>(RenderKernels.CopyBufferKernel);
+        _packSBSFlatDepthKernel = Accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<uint>, ArrayView<uint>,
+            float, int, int, int, int>(RenderKernels.PackSBSFlatDepthKernel);
     }
 
     public override void Render(ref RenderContext ctx, PlayerState state)
     {
-        if (_depthColormapKernel == null || _copyKernel == null) return;
+        int pixelCount = ctx.OutputWidth * ctx.OutputHeight;
+        if (pixelCount <= 0) return;
 
-        // If no depth data, just copy source to output
         if (ctx.Depth.Length == 0)
         {
-            int pixelCount = ctx.EyeWidth * ctx.EyeHeight;
-            if (pixelCount > 0)
-                _copyKernel((Index1D)pixelCount, ctx.LeftEye, ctx.Output);
+            // No depth: source left + solid gray at convergence plane right
+            if (_packSBSFlatDepthKernel != null)
+            {
+                _packSBSFlatDepthKernel((Index1D)pixelCount,
+                    ctx.LeftEye, ctx.Output,
+                    state.Convergence,
+                    ctx.EyeWidth, ctx.EyeHeight,
+                    ctx.OutputWidth, ctx.OutputHeight);
+            }
             return;
         }
 
-        // TODO: Side-by-side layout (source left, colormap right) requires
-        // a composite kernel or two-pass approach. For now, render the
-        // depth colormap to the full output as a preview.
-        int depthPixels = ctx.Depth.IntExtent;
-        if (depthPixels > 0 && depthPixels <= ctx.Output.IntExtent)
+        // Depth available: source left + turbo colormap right
+        if (_packSBSColormapKernel != null)
         {
-            _depthColormapKernel((Index1D)depthPixels, ctx.Depth, ctx.Output);
+            _packSBSColormapKernel((Index1D)pixelCount,
+                ctx.LeftEye, ctx.Depth, ctx.Output,
+                ctx.EyeWidth, ctx.EyeHeight,
+                ctx.DepthWidth, ctx.DepthHeight,
+                ctx.OutputWidth, ctx.OutputHeight);
         }
     }
 
     protected override void DisposeKernels()
     {
-        _depthColormapKernel = null;
-        _copyKernel = null;
+        _packSBSColormapKernel = null;
+        _packSBSFlatDepthKernel = null;
     }
 }

@@ -26,7 +26,7 @@
 		<!-- Provides access to PeerJS for WebRTC-based peer-to-peer communication, used for media streaming/sharing via WebRTC VFS backend and other real-time features in Rendusa -->
 		<PackageReference Include="SpawnDev.BlazorJS.PeerJS" Version="2.0.0" />
 		<!-- Provides access to ILGPU for GPU-accelerated computations in the browser using WebGPU and WebGL, used for performance-critical tasks such as real-time video processing, physics simulations, and other computationally intensive operations in Rendusa -->
-		<PackageReference Include="SpawnDev.ILGPU" Version="2.3.0" />
+		<PackageReference Include="SpawnDev.ILGPU" Version="3.0.0" />
 		<!-- Allows accessing Rendusa's Virtual File System from a folder on Windows -->
 		<PackageReference Include="SpawnDev.WebFS" Version="2.0.0" />
 	</ItemGroup>
